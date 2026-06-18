@@ -41,6 +41,7 @@ from PyQt6.QtCore import (
     QTimer, pyqtSignal, QPropertyAnimation,
     QEasingCurve,
 )
+from input_behavior import ensure_global_input_guard
 
 
 class _NoWheelValueFilter(QObject):
@@ -2076,6 +2077,7 @@ class ProductFormWidget(QWidget):
 
     def __init__(self, db_name, current_user="Admin", parent=None):
         super().__init__(parent)
+        ensure_global_input_guard()
         self.db_name      = db_name
         self.current_user = current_user
         self.edit_code    = None

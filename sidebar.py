@@ -25,6 +25,7 @@ from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QVariantAnimation, QEasingCurve,
     QPoint, QSize, QRect, pyqtSignal
 )
+from input_behavior import ensure_global_input_guard
 
 # ─────────────────────────────────────────────────────────────
 #  DESIGN TOKENS  —  Apple Music / macOS Light
@@ -770,6 +771,7 @@ class Sidebar(QFrame):
 
     def __init__(self, on_navigate):
         super().__init__()
+        ensure_global_input_guard()
         self.on_navigate  = on_navigate
         self._buttons     = {}          # key -> _NavButton
         self._groups      = []          # list[_NavGroup]

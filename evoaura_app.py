@@ -31,6 +31,7 @@ from PyQt6.QtGui  import QFont, QColor, QPalette, QPixmap, QImage
 
 from sidebar import Sidebar
 from product_page import ProductPage
+from input_behavior import ensure_global_input_guard
 
 # ──────────────────────────────────────────────────────────────
 #  MASTER SECRET
@@ -1902,6 +1903,7 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    ensure_global_input_guard()
     app.setStyle("Fusion")
 
     pal = QPalette()

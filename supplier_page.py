@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore  import Qt, QTimer, QDate, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
 from PyQt6.QtGui   import QFont, QColor
+from input_behavior import ensure_global_input_guard
 
 # ── mirror product_page color tokens ───────────────────────────────────────────
 try:
@@ -711,6 +712,7 @@ class SupplierFormWidget(QWidget):
 
     def __init__(self, db_name, current_user="Admin", parent=None):
         super().__init__(parent)
+        ensure_global_input_guard()
         self.db_name      = db_name
         self.current_user = current_user
         self._edit_code   = None
