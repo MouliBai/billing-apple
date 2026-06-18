@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QMessageBox, QGridLayout, QComboBox,
     QAbstractItemView, QListWidget, QListWidgetItem,
-    QCheckBox, QTabWidget, QScrollArea, QDateEdit, QDoubleSpinBox,
+    QCheckBox, QRadioButton, QButtonGroup, QTabWidget, QScrollArea, QDateEdit, QDoubleSpinBox,
     QSpinBox, QTextEdit, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyle,
     QStackedWidget, QDialog, QVBoxLayout, QFileDialog, QToolButton,
@@ -37,10 +37,19 @@ from PyQt6.QtGui  import (
     QPixmap, QPalette,
 )
 from PyQt6.QtCore import (
-    Qt, QDate, QRect,
+    Qt, QDate, QRect, QObject, QEvent,
     QTimer, pyqtSignal, QPropertyAnimation,
     QEasingCurve,
 )
+
+
+class _NoWheelValueFilter(QObject):
+    """Prevent page scrolling from changing field values."""
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Wheel:
+            return True
+        return super().eventFilter(watched, event)
+
 
 # ─────────────────────────────────────────────────────────────
 #  COMBOBOX ITEM DELEGATE  — forces black text on every item
@@ -327,6 +336,32 @@ LABEL_SS  = f"color:{C['text2']};background:transparent;font-weight:500;font-siz
 HINT_SS   = f"color:{C['text3']};background:transparent;font-size:11px;margin-top:1px;border:none;"
 SEC_HDR_SS = f"color:{C['section_hdr']};background:transparent;font-size:13px;font-weight:700;border:none;"
 
+_ALL_VARIANT_SIZES = [str(size) for size in range(16, 49, 2)]
+AGE_CATEGORIES = ["Generic", "1 - 3 age", "4 - 18 age", "18+ age"]
+VARIANT_STORAGE_GROUP = "Size"
+COLOR_STORAGE_GROUP = "Color"
+CUSTOM_STORAGE_GROUP = "Custom"
+COLOR_GROUPS = {
+    "Whites & Creams": ["White", "Off White", "Ivory", "Cream", "Pearl White", "Eggshell"],
+    "Blacks & Greys": ["Black", "Charcoal Grey", "Ash Grey", "Light Grey", "Steel Grey", "Smoke Grey"],
+    "Reds": ["Red", "Maroon", "Burgundy", "Wine", "Crimson", "Cherry Red", "Brick Red", "Ruby Red", "Tomato Red"],
+    "Pinks": ["Baby Pink", "Light Pink", "Rose Pink", "Hot Pink", "Rani Pink", "Fuchsia", "Blush Pink", "Peach Pink"],
+    "Oranges": ["Orange", "Rust Orange", "Coral", "Peach", "Terracotta", "Burnt Orange"],
+    "Yellows": ["Yellow", "Lemon Yellow", "Mustard", "Golden Yellow", "Sunflower Yellow", "Turmeric Yellow"],
+    "Greens": ["Green", "Light Green", "Dark Green", "Bottle Green", "Olive Green", "Parrot Green", "Mint Green", "Mehendi Green", "Pistachio Green", "Emerald Green", "Sea Green"],
+    "Blues": ["Sky Blue", "Baby Blue", "Aqua Blue", "Turquoise", "Peacock Blue", "Royal Blue", "Sapphire Blue", "Navy Blue", "Ink Blue", "Teal Blue"],
+    "Purples": ["Lavender", "Lilac", "Purple", "Violet", "Plum", "Magenta", "Orchid"],
+    "Browns": ["Brown", "Coffee Brown", "Chocolate Brown", "Camel", "Tan", "Walnut"],
+    "Metallic & Festive Colors": ["Gold", "Antique Gold", "Rose Gold", "Silver", "Copper", "Bronze"],
+    "Traditional Saree/Churidar Colors": ["Rani Pink", "Peacock Blue", "Mehendi Green", "Mango Yellow", "Kumkum Red", "Sindoor Red", "Lotus Pink", "Onion Pink", "Rama Green", "Rama Blue", "Sandal", "Vadamalli Purple"],
+    "Mixed Variants": ["Multicolor", "Dual Shade", "Ombre", "Printed Mix", "Floral Mix", "Contrast Color"],
+}
+LEGACY_VARIANT_GROUPS = {
+    "Kids": "1 - 3 age",
+    "Boys & Girls": "4 - 18 age",
+    "Men & Women": "18+ age",
+}
+
 # ─────────────────────────────────────────────────────────────
 #  SESSION-LEVEL DB INIT GUARD
 # ─────────────────────────────────────────────────────────────
@@ -404,6 +439,7 @@ def init_product_table(db_name, current_user="system"):
             bin_location          TEXT DEFAULT '',
             track_batch           INTEGER DEFAULT 0,
             track_expiry          INTEGER DEFAULT 0,
+            track_mfg             INTEGER DEFAULT 0,
             track_serial          INTEGER DEFAULT 0,
             mfg_date              TEXT DEFAULT '',
             expiry_date           TEXT DEFAULT '',
@@ -530,6 +566,33 @@ def init_product_table(db_name, current_user="system"):
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS product_variants (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_code  TEXT NOT NULL,
+            variant_group TEXT DEFAULT '',
+            size          TEXT NOT NULL,
+            stock         INTEGER DEFAULT 0,
+            barcode       TEXT DEFAULT '',
+            UNIQUE(product_code, variant_group, size)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS product_purchase_log (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_code       TEXT NOT NULL,
+            invoice_no         TEXT NOT NULL,
+            purchase_date      TEXT NOT NULL,
+            stock_qty          INTEGER DEFAULT 0,
+            purchase_price     REAL DEFAULT 0,
+            purchase_gst       TEXT DEFAULT '0%',
+            price_including_gst REAL DEFAULT 0,
+            created_at         TEXT DEFAULT '',
+            created_by         TEXT DEFAULT ''
+        )
+    """)
+
     c.execute("PRAGMA table_info(products)")
     existing = {r[1] for r in c.fetchall()}
     new_cols = [
@@ -574,6 +637,7 @@ def init_product_table(db_name, current_user="system"):
         ("min_order_qty","INTEGER DEFAULT 1"), ("max_stock","INTEGER DEFAULT 0"),
         ("warehouse","TEXT DEFAULT ''"), ("rack_location","TEXT DEFAULT ''"),
         ("track_batch","INTEGER DEFAULT 0"), ("track_expiry","INTEGER DEFAULT 0"),
+        ("track_mfg","INTEGER DEFAULT 0"),
         ("mfg_date","TEXT DEFAULT ''"), ("expiry_date","TEXT DEFAULT ''"),
         ("expiry_alert_days","INTEGER DEFAULT 30"), ("is_returnable","INTEGER DEFAULT 1"),
         ("allow_neg_stock","INTEGER DEFAULT 0"), ("supplier_name","TEXT DEFAULT ''"),
@@ -661,15 +725,29 @@ def get_supplier_by_name(db_name, name):
 
 def create_supplier(db_name, name, phone="", email="", gstin="", address=""):
     """Insert new supplier, return its code."""
-    import uuid, time
-    code = "SUP" + str(int(time.time()))[-7:]
+    import time
+    name = name.strip()
+    if not name:
+        return None
     now  = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with sqlite3.connect(db_name) as conn:
+            row = conn.execute(
+                "SELECT code FROM suppliers WHERE lower(name)=lower(?) LIMIT 1",
+                (name,),
+            ).fetchone()
+            if row:
+                return row[0]
+            base = "SUP" + str(int(time.time()))[-7:]
+            code = base
+            n = 1
+            while conn.execute("SELECT 1 FROM suppliers WHERE code=? LIMIT 1", (code,)).fetchone():
+                code = f"{base}{n}"
+                n += 1
             conn.execute(
-                "INSERT OR IGNORE INTO suppliers(code,name,phone,email,gstin,address,created_at) "
+                "INSERT INTO suppliers(code,name,phone,email,gstin,address,created_at) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (code, name.strip(), phone.strip(), email.strip(),
+                (code, name, phone.strip(), email.strip(),
                  gstin.strip(), address.strip(), now))
             conn.commit()
         return code
@@ -735,8 +813,37 @@ def get_product_suppliers(db_name, product_code):
 
 def get_next_item_code(db_name):
     with sqlite3.connect(db_name) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-    return f"P{str(count + 1).zfill(5)}"
+        rows = conn.execute(
+            "SELECT item_code FROM products WHERE item_code LIKE 'P%'"
+        ).fetchall()
+    max_no = 0
+    for (code,) in rows:
+        suffix = str(code or "")[1:]
+        if suffix.isdigit():
+            max_no = max(max_no, int(suffix))
+    return f"P{max_no + 1:05d}"
+
+
+def _ean13_checksum(first_12_digits: str) -> str:
+    total = 0
+    for i, ch in enumerate(first_12_digits):
+        total += int(ch) * (1 if i % 2 == 0 else 3)
+    return str((10 - (total % 10)) % 10)
+
+
+def get_next_ean13(db_name):
+    """Generate a valid EAN-13 barcode with checksum."""
+    with sqlite3.connect(db_name) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] + 1
+        while True:
+            first_12 = f"890{count:09d}"[-12:]
+            code = first_12 + _ean13_checksum(first_12)
+            exists = conn.execute(
+                "SELECT 1 FROM products WHERE barcode=? LIMIT 1", (code,)
+            ).fetchone()
+            if not exists:
+                return code
+            count += 1
 
 
 def get_product_full(db_name, item_code):
@@ -829,6 +936,122 @@ def update_product(db_name, item_code, data: dict, current_user="system"):
               data.get("selling_price", 0), data.get("mrp", 0), now, current_user))
     conn.commit()
     conn.close()
+
+
+def get_product_variants(db_name, product_code, variant_group=VARIANT_STORAGE_GROUP):
+    with sqlite3.connect(db_name) as conn:
+        rows = conn.execute(
+            "SELECT variant_group, size, stock, barcode FROM product_variants WHERE product_code=?",
+            (product_code,)
+        ).fetchall()
+    if variant_group in (COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP):
+        return {
+            (variant_group, str(name or "")): {
+                "stock": int(stock or 0), "barcode": barcode or ""
+            }
+            for group, name, stock, barcode in rows
+            if group == variant_group
+        }
+    merged = {}
+    for group, size, stock, barcode in rows:
+        if group in (COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP):
+            continue
+        key = (VARIANT_STORAGE_GROUP, str(size or ""))
+        current = merged.get(key, {"stock": 0, "barcode": ""})
+        current["stock"] = max(current["stock"], int(stock or 0))
+        if not current["barcode"] and barcode:
+            current["barcode"] = barcode
+        merged[key] = current
+    return merged
+
+
+def save_product_variants(db_name, product_code, variant_group, rows):
+    with sqlite3.connect(db_name) as conn:
+        for group, size, stock_delta, barcode in rows:
+            group = variant_group
+            delta = int(stock_delta or 0)
+            if delta <= 0:
+                if group == CUSTOM_STORAGE_GROUP:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO product_variants "
+                        "(product_code, variant_group, size, stock, barcode) "
+                        "VALUES (?,?,?,?,?)",
+                        (product_code, group, str(size), 0, barcode or ""),
+                    )
+                continue
+            old = conn.execute(
+                "SELECT stock FROM product_variants WHERE product_code=? AND variant_group=? AND size=?",
+                (product_code, group, str(size))
+            ).fetchone()
+            qty = int(old[0] if old else 0) + delta
+            conn.execute("""
+                INSERT INTO product_variants (product_code, variant_group, size, stock, barcode)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(product_code, variant_group, size)
+                DO UPDATE SET stock=excluded.stock, barcode=excluded.barcode
+            """, (product_code, group, str(size), qty, barcode or ""))
+        total = conn.execute(
+            "SELECT COALESCE(SUM(stock), 0) FROM product_variants "
+            "WHERE product_code=? AND variant_group=?",
+            (product_code, variant_group)
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE products SET stock=? WHERE item_code=?",
+            (int(total or 0), product_code)
+        )
+    return int(total or 0)
+
+
+def delete_product_variants(db_name, product_code):
+    with sqlite3.connect(db_name) as conn:
+        conn.execute("DELETE FROM product_variants WHERE product_code=?", (product_code,))
+
+
+def delete_other_variant_mode(db_name, product_code, keep_group):
+    """Remove stale rows from the mutually-exclusive variant mode."""
+    with sqlite3.connect(db_name) as conn:
+        if keep_group in (COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP):
+            conn.execute(
+                "DELETE FROM product_variants WHERE product_code=? AND variant_group<>?",
+                (product_code, keep_group),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM product_variants WHERE product_code=? "
+                "AND variant_group IN (?,?)",
+                (product_code, COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP),
+            )
+
+
+def save_purchase_log(db_name, product_code, invoice_no, purchase_date, qty,
+                      purchase_price, purchase_gst, user="system"):
+    try:
+        gst_pct = float(str(purchase_gst).replace("%", "").strip())
+    except Exception:
+        gst_pct = 0.0
+    price_with_gst = round(float(purchase_price or 0) * (1 + gst_pct / 100), 2)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(db_name) as conn:
+        conn.execute("""
+            INSERT INTO product_purchase_log
+            (product_code, invoice_no, purchase_date, stock_qty, purchase_price,
+             purchase_gst, price_including_gst, created_at, created_by)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (product_code, invoice_no, purchase_date, int(qty or 0),
+              float(purchase_price or 0), purchase_gst, price_with_gst, now, user))
+
+
+def get_purchase_log(db_name, product_code):
+    if not product_code:
+        return []
+    with sqlite3.connect(db_name) as conn:
+        return conn.execute("""
+            SELECT invoice_no, purchase_date, stock_qty, purchase_price,
+                   purchase_gst, price_including_gst
+            FROM product_purchase_log
+            WHERE product_code=?
+            ORDER BY purchase_date DESC, id DESC
+        """, (product_code,)).fetchall()
 
 
 def soft_delete_product(db_name, item_code, current_user="system"):
@@ -1466,10 +1689,14 @@ class _GBtn(QPushButton):
 #  STOCK ADJUSTMENT DIALOG
 # ─────────────────────────────────────────────────────────────
 class StockAdjDialog(QDialog):
-    def __init__(self, db_name, product_code, product_name, current_stock, user="Admin", parent=None):
+    def __init__(self, db_name, product_code, product_name, current_stock, user="Admin",
+                 parent=None, track_batch=False, track_expiry=False, track_mfg=False):
         super().__init__(parent)
         self.db_name = db_name; self.product_code = product_code; self.user = user
         self.product_name = product_name; self.current_stock = current_stock
+        self.track_batch = bool(track_batch)
+        self.track_expiry = bool(track_expiry)
+        self.track_mfg = bool(track_mfg)
         self.setWindowTitle(f"Stock Adjustment — {product_name}")
         self.setMinimumWidth(480)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -1560,12 +1787,16 @@ class StockAdjDialog(QDialog):
         bn_col.addWidget(QLabel("Batch Number", styleSheet=LABEL_SS))
         self.batch = QLineEdit(); self.batch.setPlaceholderText("e.g. B2024-001")
         self.batch.setFixedHeight(38)
+        self.batch.setEnabled(self.track_batch)
+        if not self.track_batch:
+            self.batch.setPlaceholderText("Enable batch tracking on product to use this")
         bn_col.addWidget(self.batch)
         exp_col = QVBoxLayout(); exp_col.setSpacing(4)
         exp_col.addWidget(QLabel("Expiry Date", styleSheet=LABEL_SS))
         self.f_exp = QDateEdit(); self.f_exp.setCalendarPopup(True)
         self.f_exp.setDate(QDate.currentDate().addYears(1))
         self.f_exp.setDisplayFormat("dd-MM-yyyy"); self.f_exp.setFixedHeight(38)
+        self.f_exp.setEnabled(self.track_expiry)
         exp_col.addWidget(self.f_exp)
         b_row1.addLayout(bn_col); b_row1.addLayout(exp_col)
         bf_lay.addLayout(b_row1)
@@ -1576,6 +1807,7 @@ class StockAdjDialog(QDialog):
         self.f_mfg = QDateEdit(); self.f_mfg.setCalendarPopup(True)
         self.f_mfg.setDate(QDate.currentDate())
         self.f_mfg.setDisplayFormat("dd-MM-yyyy"); self.f_mfg.setFixedHeight(38)
+        self.f_mfg.setEnabled(self.track_mfg)
         mfg_col.addWidget(self.f_mfg)
         pp_col = QVBoxLayout(); pp_col.setSpacing(4)
         pp_col.addWidget(QLabel("Purchase Price", styleSheet=LABEL_SS))
@@ -1628,7 +1860,9 @@ class StockAdjDialog(QDialog):
 
     def _on_type_changed(self, text):
         is_in_received = text == "IN — Stock Received"
-        self._batch_frame.setVisible(is_in_received)
+        self._batch_frame.setVisible(
+            is_in_received and (self.track_batch or self.track_expiry or self.track_mfg)
+        )
         self._ok_btn.setText(
             "✅  Receive Stock" if is_in_received else "✅  Apply Adjustment")
         self.adjustSize()
@@ -1643,15 +1877,25 @@ class StockAdjDialog(QDialog):
         if adj_raw == "IN — Stock Received":
             # Save as a proper new batch — does NOT touch existing batches
             bn = self.batch.text().strip()
-            if not bn:
-                from PyQt6.QtWidgets import QMessageBox
+            if self.track_batch and not bn:
                 QMessageBox.warning(self, "Batch Required",
                     "Please enter a Batch Number for new stock being received.")
                 return
+            if not (self.track_batch or self.track_expiry or self.track_mfg):
+                save_stock_adjustment(
+                    self.db_name, self.product_code, "IN", qty,
+                    reason, "", notes, self.user)
+                QMessageBox.information(self, "Stock Received",
+                    f"âœ…  {qty} units received.",
+                    QMessageBox.StandardButton.Ok)
+                self.accept()
+                return
+            if not bn:
+                bn = f"RCV{datetime.now().strftime('%Y%m%d%H%M%S')}"
             save_batch(
                 self.db_name, self.product_code, bn, qty,
-                self.f_mfg.date().toString("yyyy-MM-dd"),
-                self.f_exp.date().toString("yyyy-MM-dd"),
+                self.f_mfg.date().toString("yyyy-MM-dd") if self.track_mfg else "",
+                self.f_exp.date().toString("yyyy-MM-dd") if self.track_expiry else "",
                 self.f_pp.value(),
                 "",   # supplier (can extend later)
                 self.user
@@ -1882,6 +2126,11 @@ class ProductFormWidget(QWidget):
         self._build_tab_history()
         self._build_tab_audit()
 
+        self._no_wheel_filter = _NoWheelValueFilter(self)
+        for field_type in (QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit):
+            for field in self.findChildren(field_type):
+                field.installEventFilter(self._no_wheel_filter)
+
         # Fix combo delegate for all combos in form
         for cb in self.findChildren(QComboBox):
             _apply_combo_delegate(cb)
@@ -1917,32 +2166,31 @@ class ProductFormWidget(QWidget):
         page = QWidget(); page.setStyleSheet("background:transparent;")
         lay = QVBoxLayout(page); lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(12)
 
-        sec, g = make_section("Identity & Legal", "🔖")
+        sec, g = make_section("Basic Detail", "🔖")
 
         # widgets
-        self.f_item_code = QLineEdit(); self.f_item_code.setPlaceholderText("e.g. P00001")
-        self.f_auto_code = ToggleSwitch("Auto-generate code")
-        self.f_auto_code.stateChanged.connect(self._toggle_code)
+        self.f_item_code = QLineEdit(); self.f_item_code.setPlaceholderText("Auto-generated product no")
+        self.f_item_code.setReadOnly(True)
         self.f_sku     = QLineEdit(); self.f_sku.setPlaceholderText("Internal SKU")
-        self.f_barcode = QLineEdit(); self.f_barcode.setPlaceholderText("EAN-13 / QR / Barcode")
+        self.f_barcode = QLineEdit(); self.f_barcode.setPlaceholderText("13-digit EAN barcode")
+        self.f_auto_barcode = ToggleSwitch("Auto-generate EAN-13")
+        self.f_auto_barcode.stateChanged.connect(self._toggle_barcode)
         self.f_name    = QLineEdit(); self.f_name.setPlaceholderText("Full product name")
         self.f_alias   = QLineEdit(); self.f_alias.setPlaceholderText("Alt names, comma-separated")
         self.f_use_alias_bill = ToggleSwitch("Use this name in billing")
         self.f_use_alias_bill.setToolTip("When checked, the first alias is used as the product name on invoices")
         self.f_prod_type = QComboBox()
         self.f_prod_type.addItems(["Goods", "Service", "Digital", "Composite"])
-        self.f_tax_cat = QComboBox()
-        self.f_tax_cat.addItems(["Standard", "Nil Rated", "Exempt", "Zero Rated", "Non-GST"])
-        self.f_hsn = QLineEdit(); self.f_hsn.setPlaceholderText("e.g. 2202")
 
         # layout
         r = 0
-        add_field(g, r, 0, "Item Code", self.f_item_code, required=True)
-        g.addWidget(self.f_auto_code, r, 2, 1, 2,
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        add_field(g, r, 0, "Product No", self.f_item_code, required=True)
         r += 1
         add_field(g, r, 0, "SKU", self.f_sku)
-        add_field(g, r, 2, "Barcode / EAN", self.f_barcode)
+        add_field(g, r, 2, "Barcode / EAN", self.f_barcode, required=True)
+        r += 1
+        g.addWidget(self.f_auto_barcode, r, 3, 1, 1,
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         r += 1
         add_field(g, r, 0, "Product Name", self.f_name, required=True, span=2)
         r += 1
@@ -1953,10 +2201,6 @@ class ProductFormWidget(QWidget):
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         r += 1
         add_field(g, r, 0, "Product Type", self.f_prod_type)
-        add_field(g, r, 2, "Tax Category", self.f_tax_cat)
-        r += 1
-        add_field(g, r, 0, "HSN Code", self.f_hsn,
-                  hint="Mandatory for GST", required=True)
         lay.addWidget(sec)
 
         # Image
@@ -1998,7 +2242,7 @@ class ProductFormWidget(QWidget):
 
         self.f_manufacturer = QLineEdit()
         self.f_manufacturer.setPlaceholderText("e.g. Raymond Ltd")
-        self.f_country = QLineEdit(); self.f_country.setText("India")
+        self.f_country = QLineEdit(); self.f_country.setText("India"); self.f_country.hide()
 
         self.f_unit = QComboBox(); self.f_unit.setEditable(True)
         self.f_unit.addItems([
@@ -2027,7 +2271,6 @@ class ProductFormWidget(QWidget):
         add_field(g2, r2, 2, "Brand",         self.f_brand)
         r2 += 1
         add_field(g2, r2, 0, "Manufacturer",  self.f_manufacturer)
-        add_field(g2, r2, 2, "Country of Origin", self.f_country)
         r2 += 1
         add_field(g2, r2, 0, "Unit",          self.f_unit,
                   hint="Use ‘Meter’ for fabric — billing will calculate by length")
@@ -2045,7 +2288,7 @@ class ProductFormWidget(QWidget):
         add_field(g3, 0, 0, "Status", self.f_status, required=True)
         lay.addWidget(sec3)
         lay.addStretch()
-        self.tabs.addTab(page, "🏷️  Basic Info")
+        self.tabs.addTab(page, "BASIC DETAIL")
 
     # ── TAB 2: PRICING & TAX ──────────────────────────────
 
@@ -2075,7 +2318,6 @@ class ProductFormWidget(QWidget):
         self.f_purchase_gst.addItems(["0%","5%","12%","18%","28%"])
         self.lbl_purchase_actual = ro_label("₹ 0.00")
         self.f_selling_price  = price_spin()
-        self.f_retail_price   = price_spin()
 
         self.f_discount_pct = QDoubleSpinBox()
         self.f_discount_pct.setFixedHeight(38)
@@ -2107,6 +2349,7 @@ class ProductFormWidget(QWidget):
         self.f_min_selling_price = price_spin(); self.f_min_selling_price.hide()
         self.lbl_markup          = ro_label("—"); self.lbl_markup.hide()
         self.f_special_price     = price_spin(); self.f_special_price.hide()
+        self.f_retail_price      = price_spin(); self.f_retail_price.hide()
         self.f_sp_from = QDateEdit(); self.f_sp_from.hide()
         self.f_sp_to   = QDateEdit(); self.f_sp_to.hide()
 
@@ -2114,6 +2357,9 @@ class ProductFormWidget(QWidget):
         # f_tax_inclusive is ToggleSwitch — no stylesheet needed
 
         # GST fields
+        self.f_tax_cat = QComboBox()
+        self.f_tax_cat.addItems(["Standard", "Nil Rated", "Exempt", "Zero Rated", "Non-GST"])
+        self.f_hsn = QLineEdit(); self.f_hsn.setPlaceholderText("e.g. 2202")
         self.f_gst_rate = QComboBox()
         self.f_gst_rate.addItems(["0%","5%","12%","18%","28%"])
         self.f_igst_rate = QComboBox(); self.f_igst_rate.addItems(["0%","5%","12%","18%","28%"]); self.f_igst_rate.hide()
@@ -2131,7 +2377,8 @@ class ProductFormWidget(QWidget):
         for w in (self.f_mrp, self.f_purchase_price, self.f_selling_price,
                   self.f_retail_price, self.f_discount_pct, self.f_discount_val,
                   self.lbl_purchase_actual,
-                  self.f_purchase_gst, self.f_gst_rate, self.lbl_cgst_rate, self.lbl_sgst_rate):
+                  self.f_purchase_gst, self.f_tax_cat, self.f_hsn,
+                  self.f_gst_rate, self.lbl_cgst_rate, self.lbl_sgst_rate):
             w.setFixedHeight(FIELD_H)
 
         # ── LEFT: Price Tiers section ─────────────────────────
@@ -2148,7 +2395,7 @@ class ProductFormWidget(QWidget):
         add_field(g, r, 2, "Actual Cost (incl. GST)", self.lbl_purchase_actual, hint="Auto-calculated")
         r += 1
         add_field(g, r, 0, "Selling Price", self.f_selling_price, required=True)
-        add_field(g, r, 2, "Retail Price",  self.f_retail_price,  hint="Walk-in customer")
+        add_field(g, r, 2, "GST Rate (CGST+SGST)", self.f_gst_rate, required=True)
         r += 1
         g.addWidget(self.f_tax_inclusive, r, 0, 1, 4,
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -2168,13 +2415,13 @@ class ProductFormWidget(QWidget):
         g3.setColumnMinimumWidth(0, 160); g3.setColumnMinimumWidth(2, 160)
 
         r3 = 0
-        add_field(g3, r3, 0, "GST Rate (CGST+SGST)", self.f_gst_rate, required=True)
-        add_field(g3, r3, 2, "CGST", self.lbl_cgst_rate, hint="Half of GST rate")
+        add_field(g3, r3, 0, "HSN Code", self.f_hsn,
+                  hint="Mandatory for GST", required=True)
+        add_field(g3, r3, 2, "Tax Category", self.f_tax_cat, required=True)
         r3 += 1
-        _sgst_lbl = QLabel("SGST")
-        _sgst_lbl.setStyleSheet(f"font-size:12px;color:{C['text2']};background:transparent;border:none;")
-        g3.addWidget(_sgst_lbl, r3, 0)
-        g3.addWidget(self.lbl_sgst_rate, r3, 1, 1, 3)
+        add_field(g3, r3, 0, "CGST", self.lbl_cgst_rate, hint="Half of GST rate")
+        add_field(g3, r3, 2, "SGST", self.lbl_sgst_rate, hint="Half of GST rate")
+        r3 += 1
         lay.addWidget(sec3)
 
         lay.addStretch()
@@ -2534,6 +2781,16 @@ class ProductFormWidget(QWidget):
         self.f_auto_reorder  = ToggleSwitch("Auto-generate PO when stock hits reorder level")
         self.f_allow_neg     = ToggleSwitch("Allow negative stock")
         self.f_returnable    = ToggleSwitch("Product is returnable"); self.f_returnable.setChecked(True)
+        self.f_purchase_invoice = QLineEdit()
+        self.f_purchase_invoice.setPlaceholderText("Purchase invoice number")
+        self.f_purchase_date = QDateEdit()
+        self.f_purchase_date.setCalendarPopup(True)
+        self.f_purchase_date.setDisplayFormat("dd-MM-yyyy")
+        self.f_purchase_date.setDate(QDate.currentDate())
+        self.f_purchase_date.lineEdit().setPlaceholderText("Select purchase date")
+        self.f_purchase_date.clear()
+        _normalize_field_widget(self.f_purchase_invoice)
+        _normalize_field_widget(self.f_purchase_date)
         self.f_opening_stock.valueChanged.connect(self._update_stock_calcs)
 
         r = 0
@@ -2549,6 +2806,9 @@ class ProductFormWidget(QWidget):
         add_field(g, r, 0, "Available Stock", self.lbl_available, hint="Stock − Reserved − Damaged")
         add_field(g, r, 2, "Stock Value",     self.lbl_stock_val,  hint="Stock x Purchase Price")
         r += 1
+        add_field(g, r, 0, "Purchase Invoice No", self.f_purchase_invoice, required=True)
+        add_field(g, r, 2, "Date of Purchase", self.f_purchase_date, required=True)
+        r += 1
         add_field(g, r, 0, "Days of Stock",   self.lbl_days_left,  hint="Based on 30-day avg sales")
         r += 1
         g.addWidget(self.f_auto_reorder, r, 0, 1, 4); r += 1
@@ -2556,84 +2816,1094 @@ class ProductFormWidget(QWidget):
         g.addWidget(self.f_returnable,   r, 2, 1, 2)
         lay.addWidget(sec)
 
-        sec2, g2 = make_section("Storage Location", "🏬")
-        self.f_warehouse = QComboBox(); self.f_warehouse.setEditable(True)
-        self.f_warehouse.addItems(["Main Store", "Warehouse A", "Warehouse B", "Cold Storage", "Pharmacy Store"])
-        self.f_rack = QLineEdit(); self.f_rack.setPlaceholderText("e.g. A3-R2")
-        self.f_bin  = QLineEdit(); self.f_bin.setPlaceholderText("e.g. Bin-04")
-        r2 = 0
-        add_field(g2, r2, 0, "Warehouse",    self.f_warehouse)
-        add_field(g2, r2, 2, "Rack / Shelf", self.f_rack)
-        r2 += 1
-        add_field(g2, r2, 0, "Bin Location", self.f_bin, hint="Exact bin for pick list")
+        # Hidden stubs retained for old save/load fields; storage and batch/expiry UI is removed.
+        self.f_warehouse = QComboBox(); self.f_warehouse.setEditable(True); self.f_warehouse.hide()
+        self.f_warehouse.addItems([""])
+        self.f_rack = QLineEdit(); self.f_rack.hide()
+        self.f_bin  = QLineEdit(); self.f_bin.hide()
+        self.f_track_batch  = ToggleSwitch("Track batch numbers"); self.f_track_batch.hide()
+        self.f_track_expiry = ToggleSwitch("Track expiry dates"); self.f_track_expiry.hide()
+        self.f_track_mfg    = ToggleSwitch("Track manufacture dates"); self.f_track_mfg.hide()
+        self.f_track_serial = ToggleSwitch("Track serial numbers"); self.f_track_serial.hide()
+        self.f_mfg_date     = QDateEdit(); self.f_mfg_date.hide()
+        self.f_mfg_date.setDate(QDate.currentDate()); self.f_mfg_date.setDisplayFormat("dd-MM-yyyy")
+        self.f_expiry_date  = QDateEdit(); self.f_expiry_date.hide()
+        self.f_expiry_date.setDate(QDate.currentDate().addYears(1)); self.f_expiry_date.setDisplayFormat("dd-MM-yyyy")
+        self.f_expiry_alert = QSpinBox(); self.f_expiry_alert.hide()
+        self.f_expiry_alert.setRange(1, 365); self.f_expiry_alert.setValue(30)
+        self.lbl_shelf_calc = ro_label("—"); self.lbl_shelf_calc.hide()
+        self.batch_frame = QFrame(); self.batch_frame.hide()
+        self.batch_table = mini_table(["Batch No", "Qty", "Mfg Date", "Expiry", "Price", "Supplier"])
+
+        self._available_stock_panel = QFrame()
+        self._available_stock_panel.setObjectName("availableStockPanel")
+        self._available_stock_panel.setStyleSheet(
+            f"QFrame#availableStockPanel{{background:{C['bg_light']};"
+            f"border:1.5px solid {C['border']};border-radius:10px;}}"
+        )
+        available_lay = QVBoxLayout(self._available_stock_panel)
+        available_lay.setContentsMargins(18, 16, 18, 16); available_lay.setSpacing(8)
+        available_title = QLabel("📊  Available Stock")
+        available_title.setStyleSheet(
+            f"font-size:13px;font-weight:700;color:{C['blue']};"
+            f"background:transparent;border:none;padding-bottom:6px;"
+        )
+        available_lay.addWidget(available_title)
+        available_sep = QFrame(); available_sep.setFrameShape(QFrame.Shape.HLine)
+        available_sep.setStyleSheet(
+            f"background:{C['border']};border:none;max-height:1px;"
+        )
+        available_lay.addWidget(available_sep)
+        self._variant_summary_wrap = QWidget()
+        self._variant_summary_wrap.setStyleSheet("background:transparent;border:none;")
+        self._variant_summary_grid = QGridLayout(self._variant_summary_wrap)
+        self._variant_summary_grid.setContentsMargins(0, 4, 0, 0)
+        self._variant_summary_grid.setHorizontalSpacing(28)
+        self._variant_summary_grid.setVerticalSpacing(8)
+        available_lay.addWidget(self._variant_summary_wrap)
+        self._available_stock_panel.setVisible(False)
+        lay.addWidget(self._available_stock_panel)
+
+        sec2, g2 = make_section("Variants", "📏")
+        g2.setColumnStretch(1, 1); g2.setColumnStretch(3, 1)
+        self._variant_pending = {}
+        self._variant_drafts = {}
+        self._variant_locked = set()
+        self._variant_current_group = VARIANT_STORAGE_GROUP
+        self._variant_toggle_guard = False
+        self._color_tables = {}
+        self._color_headers = {}
+        self._open_color_category = None
+        self._custom_values = []
+        self.f_has_variants = ToggleSwitch("Variant by size")
+        self.f_has_color_variants = ToggleSwitch("Variant by color")
+        self.f_has_custom_variants = ToggleSwitch("Variant by custom")
+        # Hidden compatibility field used by existing save/load code.
+        self.f_variant_type = QComboBox()
+        self.f_variant_type.addItems(AGE_CATEGORIES)
+        self.f_variant_type.hide()
+        _apply_combo_delegate(self.f_variant_type)
+        toggle_wrap = QWidget()
+        toggle_lay = QHBoxLayout(toggle_wrap)
+        toggle_lay.setContentsMargins(0, 0, 0, 0)
+        toggle_lay.setSpacing(36)
+        toggle_lay.addWidget(self.f_has_variants)
+        toggle_lay.addWidget(self.f_has_color_variants)
+        toggle_lay.addWidget(self.f_has_custom_variants)
+        toggle_lay.addStretch()
+        g2.addWidget(toggle_wrap, 0, 0, 1, 4)
+        self._variant_type_label = QLabel("Age Category *")
+        self._variant_type_label.setStyleSheet(LABEL_SS)
+        self._variant_type_label.setVisible(False)
+        g2.addWidget(self._variant_type_label, 1, 0)
+        self._variant_radio_wrap = QWidget()
+        radio_lay = QHBoxLayout(self._variant_radio_wrap)
+        radio_lay.setContentsMargins(0, 0, 0, 0); radio_lay.setSpacing(24)
+        self._variant_radio_group = QButtonGroup(self)
+        self._variant_radios = {}
+        for group_name in AGE_CATEGORIES:
+            radio = QRadioButton(group_name)
+            radio.setFixedSize(150, 50)
+            radio.setStyleSheet(
+                f"QRadioButton{{color:{C['text']};font-size:13px;font-weight:600;"
+                f"spacing:15px;padding:0 20px;border:2px solid transparent;"
+                f"border-radius:10px;background:transparent;}}"
+                f"QRadioButton:hover{{background:#F5F6FA;}}"
+                f"QRadioButton:checked{{background:{C['accent_tint2']};"
+                f"border-color:{C['accent']};color:{C['accent_dark']};}}"
+                f"QRadioButton::indicator{{width:18px;height:18px;border-radius:9px;"
+                f"border:1px solid #9F9F9F;background:#D9D9E5;}}"
+                f"QRadioButton::indicator:checked{{background:white;"
+                f"border:2px solid {C['accent']};border-radius:9px;}}"
+            )
+            self._variant_radio_group.addButton(radio)
+            self._variant_radios[group_name] = radio
+            radio_lay.addWidget(radio)
+            radio.toggled.connect(
+                lambda checked, name=group_name:
+                    self._on_variant_radio_changed(name) if checked else None
+            )
+        radio_lay.addStretch()
+        self._variant_radios["Generic"].setChecked(True)
+        self._variant_radio_wrap.setVisible(False)
+        g2.addWidget(self._variant_radio_wrap, 1, 1, 1, 3)
+
+        self._color_accordion = QWidget()
+        self._color_accordion_lay = QVBoxLayout(self._color_accordion)
+        self._color_accordion_lay.setContentsMargins(0, 0, 0, 0)
+        self._color_accordion_lay.setSpacing(6)
+        self._color_accordion.setVisible(False)
+        g2.addWidget(self._color_accordion, 1, 0, 1, 4)
+
+        self._custom_panel = QWidget()
+        custom_lay = QVBoxLayout(self._custom_panel)
+        custom_lay.setContentsMargins(0, 0, 0, 0)
+        custom_lay.setSpacing(8)
+        custom_entry_row = QHBoxLayout()
+        custom_entry_row.setContentsMargins(0, 0, 0, 0)
+        custom_entry_row.setSpacing(8)
+        self.f_custom_variant = QLineEdit()
+        self.f_custom_variant.setPlaceholderText(
+            "Enter custom variant (for example: Small, Cotton, Premium)"
+        )
+        _normalize_field_widget(self.f_custom_variant)
+        self._custom_add_btn = _GBtn("+", "blue")
+        self._custom_add_btn.setFixedSize(46, 38)
+        self._custom_add_btn.setToolTip("Add custom variant")
+        custom_entry_row.addWidget(self.f_custom_variant, 1)
+        custom_entry_row.addWidget(self._custom_add_btn)
+        custom_lay.addLayout(custom_entry_row)
+
+        self.custom_variant_table = QTableWidget(0, 5)
+        self.custom_variant_table.setHorizontalHeaderLabels(
+            ["Custom Variant", "Available Stock", "Update Stock", "Action", "Barcode"]
+        )
+        self.custom_variant_table.verticalHeader().setVisible(False)
+        self.custom_variant_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.custom_variant_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.custom_variant_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.custom_variant_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.custom_variant_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.custom_variant_table.setVisible(False)
+        custom_lay.addWidget(self.custom_variant_table)
+        self._custom_panel.setVisible(False)
+        g2.addWidget(self._custom_panel, 1, 0, 1, 4)
+
+        self._variant_update_panel = QFrame()
+        self._variant_update_panel.setStyleSheet(
+            f"QFrame#variantUpdatePanel{{background:rgba(245,247,250,210);"
+            f"border:1.5px solid {C['border']};border-radius:10px;}}"
+        )
+        self._variant_update_panel.setObjectName("variantUpdatePanel")
+        update_lay = QVBoxLayout(self._variant_update_panel)
+        update_lay.setContentsMargins(16, 14, 16, 16); update_lay.setSpacing(10)
+
+        update_title = QLabel("Stock Update")
+        update_title.setStyleSheet(
+            f"font-size:13px;font-weight:700;color:{C['accent_dark']};"
+            f"background:transparent;border:none;"
+        )
+        update_lay.addWidget(update_title)
+
+        self.variant_table = QTableWidget(0, 5)
+        self.variant_table.setHorizontalHeaderLabels(
+            ["Size", "Available Stock", "Update Stock", "Action", "Barcode"]
+        )
+        self.variant_table.verticalHeader().setVisible(False)
+        self.variant_table.setAlternatingRowColors(True)
+        self.variant_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.variant_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.variant_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.variant_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.variant_table.setStyleSheet(f"""
+            QTableWidget{{background:{C['bg_white']};border:1px solid {C['border']};
+                border-radius:8px;font-size:12px;}}
+            QHeaderView::section{{background:{C['bg_light']};font-weight:700;padding:7px;
+                border:none;border-bottom:1px solid {C['border']};color:{C['text2']};font-size:11px;}}
+            QTableWidget::item{{padding:5px 8px;color:{C['text']};}}
+            QTableWidget::item:selected{{background:{C['accent_tint2']};color:{C['text']};}}
+        """)
+        self.variant_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        update_lay.addWidget(self.variant_table)
+        self._variant_update_panel.setVisible(False)
+        g2.addWidget(self._variant_update_panel, 2, 0, 1, 4)
+        self._build_color_accordion()
+        self.custom_variant_table.setStyleSheet(self.variant_table.styleSheet())
         lay.addWidget(sec2)
 
-        sec3, g3 = make_section("Batch & Expiry Tracking", "📅")
-        self.f_track_batch  = ToggleSwitch("Track batch numbers (FIFO)")
-        self.f_track_expiry = ToggleSwitch("Track expiry dates")
-        self.f_track_serial = ToggleSwitch("Track serial numbers (electronics)")
-        self.f_mfg_date     = QDateEdit(); self.f_mfg_date.setCalendarPopup(True)
-        self.f_mfg_date.setDate(QDate.currentDate()); self.f_mfg_date.setDisplayFormat("dd-MM-yyyy")
-        self.f_expiry_date  = QDateEdit(); self.f_expiry_date.setCalendarPopup(True)
-        self.f_expiry_date.setDate(QDate.currentDate().addYears(1)); self.f_expiry_date.setDisplayFormat("dd-MM-yyyy")
-        self.f_expiry_alert = QSpinBox(); self.f_expiry_alert.setRange(1, 365)
-        self.f_expiry_alert.setFixedHeight(38)
-        self.f_expiry_alert.setStyleSheet(_NO_ARROW)
-        self.f_expiry_alert.setValue(30); self.f_expiry_alert.setSuffix(" days before")
-        self.lbl_shelf_calc = ro_label("—")
-        self.f_mfg_date.dateChanged.connect(self._calc_shelf)
-        self.f_expiry_date.dateChanged.connect(self._calc_shelf)
+        self.f_has_variants.stateChanged.connect(self._toggle_variants)
+        self.f_has_color_variants.stateChanged.connect(self._toggle_color_variants)
+        self.f_has_custom_variants.stateChanged.connect(self._toggle_custom_variants)
+        self._custom_add_btn.clicked.connect(self._add_custom_variant)
+        self.f_custom_variant.returnPressed.connect(self._add_custom_variant)
+        self._toggle_variants(False)
 
-        r3 = 0
-        g3.addWidget(self.f_track_batch,  r3, 0, 1, 2)
-        g3.addWidget(self.f_track_expiry, r3, 2, 1, 2); r3 += 1
-        g3.addWidget(self.f_track_serial, r3, 0, 1, 4); r3 += 1
-        add_field(g3, r3, 0, "Mfg Date",     self.f_mfg_date)
-        add_field(g3, r3, 2, "Expiry Date",  self.f_expiry_date); r3 += 1
-        add_field(g3, r3, 0, "Alert Before", self.f_expiry_alert)
-        add_field(g3, r3, 2, "Shelf Life",   self.lbl_shelf_calc, hint="Auto from mfg→expiry")
-        lay.addWidget(sec3)
+        sec_log, g_log = make_section("Purchase Invoice Log", "🧾")
+        for col in range(4):
+            g_log.setColumnStretch(col, 1)
+        self.purchase_log_table = mini_table(
+            ["Invoice No", "Purchase Date", "Stock Update", "Purchase Price", "GST", "Price incl. GST"],
+            height=190
+        )
+        self.purchase_log_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        g_log.addWidget(self.purchase_log_table, 0, 0, 1, 4)
+        lay.addWidget(sec_log)
 
-        # Batch records sub-table
-        self.batch_frame = QFrame()
-        self.batch_frame.setStyleSheet(f"QFrame{{background:{C['bg_white']};border:1px solid {C['border']};border-radius:12px;}}")
-        bf_lay = QVBoxLayout(self.batch_frame); bf_lay.setContentsMargins(18, 14, 18, 14); bf_lay.setSpacing(8)
-        bh = QHBoxLayout()
-        bl = QLabel("📦  Batch Records"); bl.setStyleSheet(SEC_HDR_SS)
-        bh.addWidget(bl); bh.addStretch()
-        add_b = _GBtn("＋ Add Batch", "success"); add_b.setFixedHeight(32)
-        add_b.clicked.connect(self._add_batch); bh.addWidget(add_b)
-        bf_lay.addLayout(bh)
-        self.batch_table = mini_table(["Batch No", "Qty", "Mfg Date", "Expiry", "Price", "Supplier"])
-        bf_lay.addWidget(self.batch_table)
-        self.batch_frame.setVisible(False)
-        lay.addWidget(self.batch_frame)
-
-        # Stock adjustment history
-        self.adj_frame = QFrame()
-        self.adj_frame.setStyleSheet(f"QFrame{{background:{C['bg_white']};border:1px solid {C['border']};border-radius:12px;}}")
-        af_lay = QVBoxLayout(self.adj_frame); af_lay.setContentsMargins(18, 14, 18, 14); af_lay.setSpacing(8)
-        ah = QHBoxLayout()
-        al = QLabel("🔄  Stock Adjustment Log"); al.setStyleSheet(SEC_HDR_SS)
-        ah.addWidget(al); ah.addStretch()
-        adj_b = _GBtn("＋ Adjust Stock", "warning"); adj_b.setFixedHeight(32)
-        adj_b.clicked.connect(self._do_adj); ah.addWidget(adj_b)
-        af_lay.addLayout(ah)
+        # Hidden compatibility stubs. Stock is updated directly in the variant table.
+        self.adj_frame = QFrame(); self.adj_frame.hide()
         self.adj_table = mini_table(["Type", "Qty", "Reason", "Date", "By"])
-        af_lay.addWidget(self.adj_table)
-        self.adj_frame.setVisible(False)
-        lay.addWidget(self.adj_frame)
+        self.adj_table.hide()
 
         lay.addStretch()
         self.tabs.addTab(page, "📦  Inventory")
 
+    def _update_tracking_fields(self):
+        if not all(hasattr(self, name) for name in (
+            "f_track_mfg", "f_track_expiry", "f_mfg_date",
+            "f_expiry_date", "f_expiry_alert", "lbl_shelf_calc",
+        )):
+            return
+        track_mfg = self.f_track_mfg.isChecked()
+        track_exp = self.f_track_expiry.isChecked()
+        self.f_mfg_date.setEnabled(track_mfg)
+        self.f_expiry_date.setEnabled(track_exp)
+        self.f_expiry_alert.setEnabled(track_exp)
+        self.lbl_shelf_calc.setEnabled(track_mfg and track_exp)
+        if hasattr(self, "batch_frame"):
+            self.batch_frame.setVisible(False)
+        self._calc_shelf()
+
     def _calc_shelf(self):
+        if not (self.f_track_mfg.isChecked() and self.f_track_expiry.isChecked()):
+            self.lbl_shelf_calc.setText("—")
+            return
         days = self.f_mfg_date.date().daysTo(self.f_expiry_date.date())
         self.lbl_shelf_calc.setText(f"{days} days" if days > 0 else "—")
 
     def _update_stock_calcs(self):
+        if (
+            hasattr(self, "f_has_variants")
+            and (
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            )
+        ):
+            return
         s = self.f_opening_stock.value()
         self.lbl_available.setText(str(s))
+
+    def _build_color_accordion(self):
+        for category, colors in COLOR_GROUPS.items():
+            header = QToolButton()
+            display_category = category.replace("&", "&&")
+            header.setText(f"›  {display_category}")
+            header.setCheckable(True)
+            header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            header.setFixedHeight(42)
+            header.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            header.setStyleSheet(
+                f"QToolButton{{text-align:left;padding:0 14px;background:{C['bg_light']};"
+                f"color:{C['text']};border:1px solid {C['border']};border-radius:8px;"
+                f"font-size:12px;font-weight:700;}}"
+                f"QToolButton:hover{{border-color:{C['accent']};background:{C['accent_tint2']};}}"
+                f"QToolButton:checked{{color:{C['accent_dark']};border-color:{C['accent']};"
+                f"background:{C['accent_tint2']};}}"
+            )
+            table = QTableWidget(0, 5)
+            table.setHorizontalHeaderLabels(
+                ["Color", "Available Stock", "Update Stock", "Action", "Barcode"]
+            )
+            table.verticalHeader().setVisible(False)
+            table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            table.setStyleSheet(self.variant_table.styleSheet())
+            table.setVisible(False)
+            self._color_headers[category] = header
+            self._color_tables[category] = table
+            self._color_accordion_lay.addWidget(header)
+            self._color_accordion_lay.addWidget(table)
+            header.toggled.connect(
+                lambda checked, name=category: self._toggle_color_category(name, checked)
+            )
+        self._color_accordion_lay.addStretch()
+
+    def _toggle_color_category(self, category, checked):
+        if checked:
+            for name, header in self._color_headers.items():
+                if name != category:
+                    header.blockSignals(True)
+                    header.setChecked(False)
+                    header.blockSignals(False)
+                    self._color_tables[name].setVisible(False)
+                    header.setText(f"›  {name.replace('&', '&&')}")
+            self._open_color_category = category
+            self._color_headers[category].setText(
+                f"⌄  {category.replace('&', '&&')}"
+            )
+            self._color_tables[category].setVisible(True)
+        else:
+            self._color_headers[category].setText(
+                f"›  {category.replace('&', '&&')}"
+            )
+            self._color_tables[category].setVisible(False)
+            if self._open_color_category == category:
+                self._open_color_category = None
+
+    def _open_color_only(self, category):
+        header = self._color_headers.get(category)
+        if header:
+            if header.isChecked():
+                self._toggle_color_category(category, True)
+            else:
+                header.setChecked(True)
+
+    def _toggle_variants(self, state):
+        enabled = bool(state)
+        if enabled and self.f_has_color_variants.isChecked():
+            self.f_has_color_variants.setChecked(False)
+        if enabled and self.f_has_custom_variants.isChecked():
+            self.f_has_custom_variants.setChecked(False)
+        self._color_accordion.setVisible(False)
+        self._custom_panel.setVisible(False)
+        self.custom_variant_table.setVisible(False)
+        for table in self._color_tables.values():
+            table.setVisible(False)
+        self._variant_type_label.setVisible(enabled)
+        self.f_variant_type.setVisible(False)
+        self._variant_radio_wrap.setVisible(enabled)
+        self._available_stock_panel.setVisible(enabled)
+        self._variant_update_panel.setVisible(enabled)
+        self._variant_summary_wrap.setVisible(enabled)
+        self.variant_table.setVisible(enabled)
+        self.f_opening_stock.setEnabled(
+            not enabled
+            and not self.f_has_color_variants.isChecked()
+            and not self.f_has_custom_variants.isChecked()
+        )
+        if enabled:
+            self._rebuild_variant_table()
+        else:
+            self._capture_variant_updates()
+            self.variant_table.setRowCount(0)
+            if not (
+                self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            ):
+                self._available_stock_panel.setVisible(False)
+                self._update_stock_calcs()
+
+    def _toggle_color_variants(self, state):
+        enabled = bool(state)
+        if enabled and self.f_has_variants.isChecked():
+            self.f_has_variants.setChecked(False)
+        if enabled and self.f_has_custom_variants.isChecked():
+            self.f_has_custom_variants.setChecked(False)
+        self._variant_type_label.setVisible(False)
+        self._variant_radio_wrap.setVisible(False)
+        self._variant_update_panel.setVisible(False)
+        self.variant_table.setVisible(False)
+        self._custom_panel.setVisible(False)
+        self.custom_variant_table.setVisible(False)
+        self._color_accordion.setVisible(enabled)
+        self._available_stock_panel.setVisible(enabled)
+        self._variant_summary_wrap.setVisible(enabled)
+        self.f_opening_stock.setEnabled(
+            not enabled
+            and not self.f_has_variants.isChecked()
+            and not self.f_has_custom_variants.isChecked()
+        )
+        if enabled:
+            self._variant_current_group = COLOR_STORAGE_GROUP
+            self._rebuild_color_tables()
+            category = self._open_color_category or next(iter(COLOR_GROUPS))
+            self._open_color_only(category)
+        else:
+            self._capture_color_updates()
+            for header in self._color_headers.values():
+                header.blockSignals(True)
+                header.setChecked(False)
+                header.blockSignals(False)
+            for table in self._color_tables.values():
+                table.setVisible(False)
+            self._open_color_category = None
+            if not (
+                self.f_has_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            ):
+                self._available_stock_panel.setVisible(False)
+                self._update_stock_calcs()
+
+    def _toggle_custom_variants(self, state):
+        enabled = bool(state)
+        if enabled and self.f_has_variants.isChecked():
+            self.f_has_variants.setChecked(False)
+        if enabled and self.f_has_color_variants.isChecked():
+            self.f_has_color_variants.setChecked(False)
+        self._variant_type_label.setVisible(False)
+        self._variant_radio_wrap.setVisible(False)
+        self._variant_update_panel.setVisible(False)
+        self.variant_table.setVisible(False)
+        self._color_accordion.setVisible(False)
+        for table in self._color_tables.values():
+            table.setVisible(False)
+        self._custom_panel.setVisible(enabled)
+        self.custom_variant_table.setVisible(enabled)
+        self._available_stock_panel.setVisible(enabled)
+        self._variant_summary_wrap.setVisible(enabled)
+        self.f_opening_stock.setEnabled(
+            not enabled
+            and not self.f_has_variants.isChecked()
+            and not self.f_has_color_variants.isChecked()
+        )
+        if enabled:
+            self._variant_current_group = CUSTOM_STORAGE_GROUP
+            self._load_custom_values()
+            self._rebuild_custom_table()
+            QTimer.singleShot(0, self.f_custom_variant.setFocus)
+        else:
+            self._capture_custom_updates()
+            if not (
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+            ):
+                self._available_stock_panel.setVisible(False)
+                self._update_stock_calcs()
+
+    def _load_custom_values(self):
+        saved = self._custom_stock_map()
+        for group, name in saved:
+            if group == CUSTOM_STORAGE_GROUP and name not in self._custom_values:
+                self._custom_values.append(name)
+
+    def _add_custom_variant(self):
+        name = self.f_custom_variant.text().strip()
+        if not name:
+            self.f_custom_variant.setFocus()
+            return
+        if any(existing.casefold() == name.casefold() for existing in self._custom_values):
+            QMessageBox.information(
+                self, "Custom Variant", f'"{name}" is already in the list.'
+            )
+            self.f_custom_variant.selectAll()
+            return
+        self._capture_custom_updates()
+        self._custom_values.append(name)
+        self.f_custom_variant.clear()
+        self._rebuild_custom_table()
+        self.f_custom_variant.setFocus()
+
+    def _custom_stock_map(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        return (
+            get_product_variants(self.db_name, product_code, CUSTOM_STORAGE_GROUP)
+            if product_code else {}
+        )
+
+    def _rebuild_custom_table(self):
+        saved = self._custom_stock_map()
+        table = self.custom_variant_table
+        table.setRowCount(0)
+        for name in self._custom_values:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setRowHeight(row, 68)
+
+            name_item = QTableWidgetItem(name)
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, 0, name_item)
+
+            existing = saved.get((CUSTOM_STORAGE_GROUP, name), {}).get("stock", 0)
+            available = QTableWidgetItem(str(existing))
+            available.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, 1, available)
+
+            key = (CUSTOM_STORAGE_GROUP, name)
+            qty = QSpinBox()
+            qty.setRange(0, 9999999)
+            qty.setValue(int(self._variant_drafts.get(
+                key, self._variant_pending.get(key, 0)
+            ) or 0))
+            qty.setFixedHeight(46)
+            qty.setStyleSheet(_NO_ARROW)
+            qty.setEnabled(key not in self._variant_locked)
+            if hasattr(self, "_no_wheel_filter"):
+                qty.installEventFilter(self._no_wheel_filter)
+            qty.valueChanged.connect(
+                lambda value, n=name: self._on_variant_draft_changed(
+                    CUSTOM_STORAGE_GROUP, n, value
+                )
+            )
+            table.setCellWidget(row, 2, qty)
+
+            action = _GBtn("EDIT" if key in self._variant_locked else "UPDATE", "success")
+            action.setFixedHeight(46)
+            action.clicked.connect(
+                lambda _checked=False, n=name, r=row:
+                    self._toggle_custom_row(n, r)
+            )
+            table.setCellWidget(row, 3, action)
+
+            barcode = _GBtn("Print Label", "blue")
+            barcode.setFixedHeight(46)
+            barcode.clicked.connect(
+                lambda _checked=False, n=name: self._print_custom_barcode(n)
+            )
+            table.setCellWidget(row, 4, barcode)
+
+        table.horizontalHeader().setFixedHeight(48)
+        table.setFixedHeight(48 + len(self._custom_values) * 68 + 4)
+        self._refresh_custom_summary(saved)
+        self._sync_variant_total()
+
+    def _capture_custom_updates(self):
+        table = self.custom_variant_table
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 0)
+            spin = table.cellWidget(row, 2)
+            if name_item and isinstance(spin, QSpinBox):
+                self._variant_drafts[
+                    (CUSTOM_STORAGE_GROUP, name_item.text())
+                ] = spin.value()
+
+    def _toggle_custom_row(self, name, row):
+        key = (CUSTOM_STORAGE_GROUP, name)
+        spin = self.custom_variant_table.cellWidget(row, 2)
+        button = self.custom_variant_table.cellWidget(row, 3)
+        if not isinstance(spin, QSpinBox) or not isinstance(button, QPushButton):
+            return
+        if key in self._variant_locked:
+            self._variant_locked.remove(key)
+            self._variant_pending.pop(key, None)
+            spin.setEnabled(True)
+            spin.setStyleSheet(
+                _NO_ARROW + f"QSpinBox{{border:2px solid {C['accent']};"
+                f"border-radius:8px;background:{C['bg_white']};}}"
+            )
+            button.setText("UPDATE")
+            QTimer.singleShot(0, lambda: (spin.setFocus(), spin.selectAll()))
+        else:
+            value = spin.value()
+            self._variant_drafts[key] = value
+            if value > 0:
+                self._variant_pending[key] = value
+            else:
+                self._variant_pending.pop(key, None)
+            self._variant_locked.add(key)
+            spin.setEnabled(False)
+            spin.setStyleSheet(_NO_ARROW)
+            button.setText("EDIT")
+        self._sync_variant_total()
+
+    def _custom_rows(self):
+        self._capture_custom_updates()
+        return [
+            (
+                CUSTOM_STORAGE_GROUP,
+                name,
+                int(self._variant_pending.get(
+                    (CUSTOM_STORAGE_GROUP, name), 0
+                ) or 0),
+                "",
+            )
+            for name in self._custom_values
+        ]
+
+    def _print_custom_barcode(self, name):
+        QMessageBox.information(
+            self, "Barcode", f"Barcode label for {name} will be added later."
+        )
+
+    def _refresh_custom_summary(self, saved=None):
+        if not hasattr(self, "_variant_summary_grid"):
+            return
+        while self._variant_summary_grid.count():
+            item = self._variant_summary_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        saved = saved if saved is not None else self._custom_stock_map()
+        available = [
+            (name, int(saved.get(
+                (CUSTOM_STORAGE_GROUP, name), {}
+            ).get("stock", 0) or 0))
+            for name in self._custom_values
+        ]
+        available = [(name, qty) for name, qty in available if qty > 0]
+        for index, (name, qty) in enumerate(available):
+            row = index // 3
+            pair_col = (index % 3) * 2
+            name_label = QLabel(name)
+            name_label.setStyleSheet(
+                f"font-size:12px;color:{C['text2']};background:transparent;border:none;"
+            )
+            qty_label = QLabel(str(qty))
+            qty_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            qty_label.setStyleSheet(
+                f"font-size:12px;font-weight:700;color:{C['text']};"
+                "background:transparent;border:none;"
+            )
+            self._variant_summary_grid.addWidget(name_label, row, pair_col)
+            self._variant_summary_grid.addWidget(qty_label, row, pair_col + 1)
+        total_row = ((len(available) + 2) // 3) + 1 if available else 0
+        total_label = QLabel("Total Stock")
+        total_label.setStyleSheet(
+            f"font-size:12px;color:{C['blue']};font-weight:600;"
+            "background:transparent;border:none;"
+        )
+        total_value = QLabel(str(sum(qty for _name, qty in available)))
+        total_value.setStyleSheet(
+            f"font-size:13px;font-weight:700;color:{C['blue']};"
+            "background:transparent;border:none;"
+        )
+        self._variant_summary_grid.addWidget(total_label, total_row, 0)
+        self._variant_summary_grid.addWidget(total_value, total_row, 1)
+
+    def _rebuild_color_tables(self):
+        saved = self._color_stock_map()
+        for category, colors in COLOR_GROUPS.items():
+            table = self._color_tables[category]
+            table.setRowCount(0)
+            for color in colors:
+                row = table.rowCount()
+                table.insertRow(row)
+                table.setRowHeight(row, 68)
+
+                color_item = QTableWidgetItem(color)
+                color_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 0, color_item)
+
+                existing = saved.get((COLOR_STORAGE_GROUP, color), {}).get("stock", 0)
+                available = QTableWidgetItem(str(existing))
+                available.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 1, available)
+
+                key = (COLOR_STORAGE_GROUP, color)
+                qty = QSpinBox()
+                qty.setRange(0, 9999999)
+                qty.setValue(int(self._variant_drafts.get(
+                    key, self._variant_pending.get(key, 0)
+                ) or 0))
+                qty.setFixedHeight(46)
+                qty.setStyleSheet(_NO_ARROW)
+                qty.setEnabled(key not in self._variant_locked)
+                if hasattr(self, "_no_wheel_filter"):
+                    qty.installEventFilter(self._no_wheel_filter)
+                qty.valueChanged.connect(
+                    lambda value, c=color: self._on_variant_draft_changed(
+                        COLOR_STORAGE_GROUP, c, value
+                    )
+                )
+                table.setCellWidget(row, 2, qty)
+
+                action = _GBtn("EDIT" if key in self._variant_locked else "UPDATE", "success")
+                action.setFixedHeight(46)
+                action.clicked.connect(
+                    lambda _checked=False, cat=category, c=color, r=row, t=table:
+                        self._toggle_color_row(cat, c, r, t)
+                )
+                table.setCellWidget(row, 3, action)
+
+                barcode = _GBtn("Print Label", "blue")
+                barcode.setFixedHeight(46)
+                barcode.clicked.connect(
+                    lambda _checked=False, c=color: self._print_color_barcode(c)
+                )
+                table.setCellWidget(row, 4, barcode)
+
+            table.horizontalHeader().setFixedHeight(48)
+            table.setFixedHeight(48 + len(colors) * 68 + 4)
+        self._refresh_color_summary(saved)
+        self._sync_variant_total()
+
+    def _capture_color_updates(self):
+        for table in self._color_tables.values():
+            for row in range(table.rowCount()):
+                color_item = table.item(row, 0)
+                spin = table.cellWidget(row, 2)
+                if color_item and isinstance(spin, QSpinBox):
+                    self._variant_drafts[
+                        (COLOR_STORAGE_GROUP, color_item.text())
+                    ] = spin.value()
+
+    def _color_stock_map(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        return (
+            get_product_variants(self.db_name, product_code, COLOR_STORAGE_GROUP)
+            if product_code else {}
+        )
+
+    def _toggle_color_row(self, category, color, row, table):
+        self._open_color_only(category)
+        key = (COLOR_STORAGE_GROUP, color)
+        spin = table.cellWidget(row, 2)
+        button = table.cellWidget(row, 3)
+        if not isinstance(spin, QSpinBox) or not isinstance(button, QPushButton):
+            return
+        if key in self._variant_locked:
+            self._variant_locked.remove(key)
+            self._variant_pending.pop(key, None)
+            spin.setEnabled(True)
+            spin.setStyleSheet(
+                _NO_ARROW + f"QSpinBox{{border:2px solid {C['accent']};"
+                f"border-radius:8px;background:{C['bg_white']};}}"
+            )
+            button.setText("UPDATE")
+            QTimer.singleShot(0, lambda: (spin.setFocus(), spin.selectAll()))
+        else:
+            value = spin.value()
+            self._variant_drafts[key] = value
+            if value > 0:
+                self._variant_pending[key] = value
+            else:
+                self._variant_pending.pop(key, None)
+            self._variant_locked.add(key)
+            spin.setEnabled(False)
+            spin.setStyleSheet(_NO_ARROW)
+            button.setText("EDIT")
+        self._sync_variant_total()
+
+    def _color_rows(self):
+        self._capture_color_updates()
+        rows = []
+        for colors in COLOR_GROUPS.values():
+            for color in colors:
+                qty = int(self._variant_pending.get(
+                    (COLOR_STORAGE_GROUP, color), 0
+                ) or 0)
+                if qty > 0:
+                    rows.append((COLOR_STORAGE_GROUP, color, qty, ""))
+        return rows
+
+    def _print_color_barcode(self, color):
+        QMessageBox.information(
+            self, "Barcode", f"Barcode label for {color} will be added later."
+        )
+
+    def _refresh_color_summary(self, saved=None):
+        if not hasattr(self, "_variant_summary_grid"):
+            return
+        while self._variant_summary_grid.count():
+            item = self._variant_summary_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        saved = saved if saved is not None else self._color_stock_map()
+        available = []
+        seen = set()
+        for colors in COLOR_GROUPS.values():
+            for color in colors:
+                if color in seen:
+                    continue
+                seen.add(color)
+                qty = int(saved.get(
+                    (COLOR_STORAGE_GROUP, color), {}
+                ).get("stock", 0) or 0)
+                if qty > 0:
+                    available.append((color, qty))
+        for index, (color, qty) in enumerate(available):
+            row = index // 3
+            pair_col = (index % 3) * 2
+            name = QLabel(color)
+            name.setStyleSheet(
+                f"font-size:12px;color:{C['text2']};background:transparent;border:none;"
+            )
+            value = QLabel(str(qty))
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setStyleSheet(
+                f"font-size:12px;font-weight:700;color:{C['text']};"
+                "background:transparent;border:none;"
+            )
+            self._variant_summary_grid.addWidget(name, row, pair_col)
+            self._variant_summary_grid.addWidget(value, row, pair_col + 1)
+        total_row = ((len(available) + 2) // 3) + 1 if available else 0
+        total_label = QLabel("Total Stock")
+        total_label.setStyleSheet(
+            f"font-size:12px;color:{C['blue']};font-weight:600;"
+            "background:transparent;border:none;"
+        )
+        total_value = QLabel(str(sum(qty for _color, qty in available)))
+        total_value.setStyleSheet(
+            f"font-size:13px;font-weight:700;color:{C['blue']};"
+            "background:transparent;border:none;"
+        )
+        self._variant_summary_grid.addWidget(total_label, total_row, 0)
+        self._variant_summary_grid.addWidget(total_value, total_row, 1)
+
+    def _on_variant_radio_changed(self, group):
+        idx = self.f_variant_type.findText(group)
+        if idx >= 0:
+            self.f_variant_type.setCurrentIndex(idx)
+
+    def _capture_variant_updates(self):
+        if not hasattr(self, "variant_table") or not hasattr(self, "_variant_current_group"):
+            return
+        group = VARIANT_STORAGE_GROUP
+        for row in range(self.variant_table.rowCount()):
+            size_item = self.variant_table.item(row, 0)
+            spin = self.variant_table.cellWidget(row, 2)
+            if size_item and isinstance(spin, QSpinBox):
+                self._variant_drafts[(group, size_item.text())] = spin.value()
+
+    def _variant_stock_map(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        return get_product_variants(self.db_name, product_code) if product_code else {}
+
+    def _rebuild_variant_table(self):
+        if not hasattr(self, "variant_table") or not self.f_has_variants.isChecked():
+            return
+        group = VARIANT_STORAGE_GROUP
+        self._variant_current_group = group
+        sizes = _ALL_VARIANT_SIZES
+        saved = self._variant_stock_map()
+        self._refresh_variant_summary(saved)
+        self.variant_table.setRowCount(0)
+        for size in sizes:
+            row = self.variant_table.rowCount()
+            self.variant_table.insertRow(row)
+            self.variant_table.setRowHeight(row, 68)
+
+            size_item = QTableWidgetItem(size)
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.variant_table.setItem(row, 0, size_item)
+
+            existing = saved.get((group, size), {}).get("stock", 0)
+            avail_item = QTableWidgetItem(str(existing))
+            avail_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            avail_item.setFlags(avail_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.variant_table.setItem(row, 1, avail_item)
+
+            qty = QSpinBox()
+            qty.setRange(0, 9999999)
+            key = (group, size)
+            value = self._variant_drafts.get(key, self._variant_pending.get(key, 0))
+            qty.setValue(int(value or 0))
+            qty.setFixedHeight(46)
+            qty.setStyleSheet(_NO_ARROW)
+            qty.setEnabled(key not in self._variant_locked)
+            if hasattr(self, "_no_wheel_filter"):
+                qty.installEventFilter(self._no_wheel_filter)
+            qty.valueChanged.connect(
+                lambda value, g=group, s=size: self._on_variant_draft_changed(g, s, value)
+            )
+            self.variant_table.setCellWidget(row, 2, qty)
+
+            action = _GBtn("EDIT" if key in self._variant_locked else "UPDATE", "success")
+            action.setFixedHeight(46)
+            action.clicked.connect(
+                lambda _checked=False, g=group, s=size, r=row: self._toggle_variant_row(g, s, r)
+            )
+            self.variant_table.setCellWidget(row, 3, action)
+
+            btn = _GBtn("Print Label", "blue")
+            btn.setFixedHeight(46)
+            btn.clicked.connect(lambda _checked=False, s=size: self._print_variant_barcode(s))
+            self.variant_table.setCellWidget(row, 4, btn)
+
+        header_h = 48
+        row_h = 68
+        self.variant_table.horizontalHeader().setFixedHeight(header_h)
+        self.variant_table.setFixedHeight(header_h + (len(sizes) * row_h) + 4)
+        self._sync_variant_total()
+
+    def _refresh_variant_summary(self, saved=None):
+        if not hasattr(self, "_variant_summary_grid"):
+            return
+        while self._variant_summary_grid.count():
+            item = self._variant_summary_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        saved = saved if saved is not None else self._variant_stock_map()
+        available = []
+        for size in _ALL_VARIANT_SIZES:
+            qty = int(saved.get((VARIANT_STORAGE_GROUP, size), {}).get("stock", 0) or 0)
+            if qty > 0:
+                available.append((size, qty))
+
+        for index, (size, qty) in enumerate(available):
+            row = index // 3
+            pair_col = (index % 3) * 2
+            size_lbl = QLabel(f"Size {size}")
+            size_lbl.setStyleSheet(
+                f"font-size:12px;color:{C['text2']};"
+                f"background:transparent;border:none;"
+            )
+            qty_lbl = QLabel(str(qty))
+            qty_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            qty_lbl.setStyleSheet(
+                f"font-size:12px;font-weight:700;color:{C['text']};"
+                f"background:transparent;border:none;"
+            )
+            self._variant_summary_grid.addWidget(size_lbl, row, pair_col)
+            self._variant_summary_grid.addWidget(qty_lbl, row, pair_col + 1)
+
+        total = sum(qty for _size, qty in available)
+        total_row = ((len(available) + 2) // 3) + 1 if available else 0
+        total_lbl = QLabel("Total Stock")
+        total_lbl.setStyleSheet(
+            f"font-size:12px;color:{C['blue']};font-weight:600;"
+            f"background:transparent;border:none;"
+        )
+        total_value = QLabel(str(total))
+        total_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        total_value.setStyleSheet(
+            f"font-size:13px;font-weight:700;color:{C['blue']};"
+            f"background:transparent;border:none;"
+        )
+        self._variant_summary_grid.addWidget(total_lbl, total_row, 0)
+        self._variant_summary_grid.addWidget(total_value, total_row, 1)
+
+    def _on_variant_draft_changed(self, group, size, value):
+        self._variant_drafts[(group, size)] = int(value or 0)
+
+    def _toggle_variant_row(self, group, size, row):
+        key = (group, size)
+        spin = self.variant_table.cellWidget(row, 2)
+        button = self.variant_table.cellWidget(row, 3)
+        if not isinstance(spin, QSpinBox) or not isinstance(button, QPushButton):
+            return
+        if key in self._variant_locked:
+            self._variant_locked.remove(key)
+            self._variant_pending.pop(key, None)
+            spin.setEnabled(True)
+            spin.setStyleSheet(
+                _NO_ARROW +
+                f"QSpinBox{{border:2px solid {C['accent']};"
+                f"border-radius:8px;background:{C['bg_white']};}}"
+            )
+            button.setText("UPDATE")
+            QTimer.singleShot(0, lambda: (spin.setFocus(), spin.selectAll()))
+        else:
+            value = spin.value()
+            self._variant_drafts[key] = value
+            if value > 0:
+                self._variant_pending[key] = value
+            else:
+                self._variant_pending.pop(key, None)
+            self._variant_locked.add(key)
+            spin.setEnabled(False)
+            spin.setStyleSheet(_NO_ARROW)
+            button.setText("EDIT")
+        self._sync_variant_total()
+
+    def _variant_rows(self):
+        self._capture_variant_updates()
+        if not hasattr(self, "variant_table") or not self.f_has_variants.isChecked():
+            return []
+        rows = []
+        for size in _ALL_VARIANT_SIZES:
+            qty = int(self._variant_pending.get((VARIANT_STORAGE_GROUP, size), 0) or 0)
+            if qty > 0:
+                rows.append((VARIANT_STORAGE_GROUP, size, qty, ""))
+        return rows
+
+    def _sync_variant_total(self):
+        if not hasattr(self, "variant_table"):
+            return
+        if not (
+            self.f_has_variants.isChecked()
+            or self.f_has_color_variants.isChecked()
+            or self.f_has_custom_variants.isChecked()
+        ):
+            return
+        if self.f_has_custom_variants.isChecked():
+            group = CUSTOM_STORAGE_GROUP
+        elif self.f_has_color_variants.isChecked():
+            group = COLOR_STORAGE_GROUP
+        else:
+            group = VARIANT_STORAGE_GROUP
+        pending_total = sum(
+            int(v or 0) for (item_group, _name), v in self._variant_pending.items()
+            if item_group == group
+        )
+        available_total = self._variant_saved_total()
+        self.f_opening_stock.blockSignals(True)
+        self.f_opening_stock.setValue(pending_total)
+        self.f_opening_stock.blockSignals(False)
+        self.lbl_available.setText(str(available_total))
+
+    def _print_variant_barcode(self, size):
+        QMessageBox.information(self, "Barcode", f"Barcode label for size {size} will be added later.")
+
+    def _variant_saved_total(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        if not product_code:
+            return 0
+        if self.f_has_custom_variants.isChecked():
+            group = CUSTOM_STORAGE_GROUP
+        elif self.f_has_color_variants.isChecked():
+            group = COLOR_STORAGE_GROUP
+        else:
+            group = VARIANT_STORAGE_GROUP
+        return sum(
+            v.get("stock", 0)
+            for v in get_product_variants(self.db_name, product_code, group).values()
+        )
+
+    def _variant_pending_total(self):
+        if self.f_has_custom_variants.isChecked():
+            self._capture_custom_updates()
+            group = CUSTOM_STORAGE_GROUP
+        elif self.f_has_color_variants.isChecked():
+            self._capture_color_updates()
+            group = COLOR_STORAGE_GROUP
+        else:
+            self._capture_variant_updates()
+            group = VARIANT_STORAGE_GROUP
+        return sum(
+            int(v or 0) for (item_group, _name), v in self._variant_pending.items()
+            if item_group == group
+        )
+
+    def _purchase_price_including_gst(self):
+        try:
+            gst = float(self.f_purchase_gst.currentText().replace("%", "").strip())
+        except Exception:
+            gst = 0.0
+        return round(self.f_purchase_price.value() * (1 + gst / 100), 2)
+
+    def _stock_update_qty(self):
+        if (
+            self.f_has_variants.isChecked()
+            or self.f_has_color_variants.isChecked()
+            or self.f_has_custom_variants.isChecked()
+        ):
+            return self._variant_pending_total()
+        return self.f_opening_stock.value() if not self.edit_code else 0
+
+    def _save_purchase_entry(self, product_code, qty):
+        if qty <= 0:
+            return
+        save_purchase_log(
+            self.db_name,
+            product_code,
+            self.f_purchase_invoice.text().strip(),
+            self.f_purchase_date.date().toString("yyyy-MM-dd"),
+            qty,
+            self.f_purchase_price.value(),
+            self.f_purchase_gst.currentText(),
+            self.current_user,
+        )
+        self.f_purchase_invoice.clear()
+        self.f_purchase_date.setDate(QDate.currentDate())
+        self.f_purchase_date.clear()
+        self._load_purchase_log(product_code)
+
+    def _load_purchase_log(self, product_code=None):
+        code = product_code or self.edit_code or self.f_item_code.text().strip()
+        rows = get_purchase_log(self.db_name, code)
+        self.purchase_log_table.setRowCount(0)
+        for invoice, purchase_date, qty, price, gst, price_with_gst in rows:
+            row = self.purchase_log_table.rowCount()
+            self.purchase_log_table.insertRow(row)
+            values = [
+                invoice, purchase_date, qty,
+                f"₹{float(price or 0):,.2f}", gst,
+                f"₹{float(price_with_gst or 0):,.2f}",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.purchase_log_table.setItem(row, col, item)
 
     def _add_batch(self):
         if not self.edit_code:
@@ -2650,7 +3920,10 @@ class ProductFormWidget(QWidget):
         p = get_product_full(self.db_name, self.edit_code)
         dlg = StockAdjDialog(self.db_name, self.edit_code,
                              self.f_name.text() or self.edit_code,
-                             p.get("stock", 0) if p else 0, self.current_user, self)
+                             p.get("stock", 0) if p else 0, self.current_user, self,
+                             track_batch=False,
+                             track_expiry=False,
+                             track_mfg=False)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._load_adj()
 
@@ -2795,22 +4068,17 @@ class ProductFormWidget(QWidget):
         g_linked.addWidget(self._linked_list, 0, 0, 1, 4)
         lay.addWidget(self._sec_linked)
 
-        # ── Dimensions & Variants ─────────────────────────────────────────────
-        sec3, g3 = make_section("Physical Dimensions & Variants", "\U0001f4d0")
+        # ── Dimensions ───────────────────────────────────────────────────────
+        sec3, g3 = make_section("Physical Dimensions", "\U0001f4d0")
         def dspin(s):
             w = QDoubleSpinBox(); w.setRange(0, 9999); w.setDecimals(3); w.setSuffix(s)
             w.setFixedHeight(38); w.setStyleSheet(_NO_ARROW)
             return w
         self.f_weight = dspin(" kg"); self.f_length = dspin(" cm")
         self.f_width  = dspin(" cm"); self.f_height = dspin(" cm")
-        self.f_has_variants = ToggleSwitch("Has variants (size / colour / weight\u2026)")
-        self.f_variant_type = QComboBox(); self.f_variant_type.setEditable(True)
-        self.f_variant_type.addItems(["Size", "Weight", "Colour", "Flavour", "Custom"])
         r3 = 0
         add_field(g3, r3, 0, "Weight", self.f_weight); add_field(g3, r3, 2, "Length", self.f_length); r3 += 1
-        add_field(g3, r3, 0, "Width",  self.f_width);  add_field(g3, r3, 2, "Height", self.f_height); r3 += 1
-        g3.addWidget(self.f_has_variants, r3, 0, 1, 4); r3 += 1
-        add_field(g3, r3, 0, "Variant Type", self.f_variant_type)
+        add_field(g3, r3, 0, "Width",  self.f_width);  add_field(g3, r3, 2, "Height", self.f_height)
         lay.addWidget(sec3)
         lay.addStretch()
         self.tabs.addTab(page, "\U0001f69a  Supplier")
@@ -2910,6 +4178,8 @@ class ProductFormWidget(QWidget):
     def _save_supplier_link(self, product_code):
         """Called after product save — create supplier if new, then link to product."""
         name = self.f_supplier_name.currentText().strip()
+        if self.f_supplier_name.isEditable() and self.f_supplier_name.lineEdit():
+            name = self.f_supplier_name.lineEdit().text().strip() or name
         if not name:
             return
 
@@ -3152,8 +4422,14 @@ class ProductFormWidget(QWidget):
         self.edit_code = None; self.prod = {}
         self._title_lbl.setText("Add Product"); self._btn_save.setText("💾  Save Product")
         self._reset_fields()
-        self.f_item_code.setReadOnly(False)
-        self.f_auto_code.setVisible(True); self.f_auto_code.setChecked(False)
+        self.f_item_code.setText(get_next_item_code(self.db_name))
+        self.f_item_code.setReadOnly(True)
+        self.f_auto_barcode.setVisible(True); self.f_auto_barcode.setChecked(False)
+        self.f_barcode.setReadOnly(False)
+        self._toggle_variants(False)
+        self._toggle_color_variants(False)
+        self._toggle_custom_variants(False)
+        self._load_purchase_log()
         self.batch_frame.setVisible(False); self.adj_frame.setVisible(False)
         self.tabs.setCurrentIndex(0)
 
@@ -3162,20 +4438,56 @@ class ProductFormWidget(QWidget):
         self.prod = get_product_full(self.db_name, item_code) or {}
         self._title_lbl.setText(f"Edit — {item_code}"); self._btn_save.setText("💾  Update Product")
         self._reset_fields(); self._populate()
-        self.f_item_code.setReadOnly(True); self.f_auto_code.setVisible(False)
-        self.batch_frame.setVisible(True); self.adj_frame.setVisible(True)
-        self._load_batches(); self._load_adj(); self._load_history(); self._load_audit()
+        saved_colors = get_product_variants(
+            self.db_name, item_code, COLOR_STORAGE_GROUP
+        )
+        saved_custom = get_product_variants(
+            self.db_name, item_code, CUSTOM_STORAGE_GROUP
+        )
+        saved_variants = get_product_variants(self.db_name, item_code)
+        if saved_custom or self.prod.get("variant_type") == CUSTOM_STORAGE_GROUP:
+            self._custom_values = [name for _group, name in saved_custom]
+            self.f_has_custom_variants.setChecked(True)
+        elif saved_colors or self.prod.get("variant_type") == COLOR_STORAGE_GROUP:
+            self.f_has_color_variants.setChecked(True)
+        elif saved_variants or bool(self.prod.get("has_variants")):
+            age_category = self.prod.get("variant_type") or "Generic"
+            age_category = LEGACY_VARIANT_GROUPS.get(age_category, age_category)
+            if age_category not in AGE_CATEGORIES:
+                age_category = "Generic"
+            idx = self.f_variant_type.findText(age_category)
+            if idx >= 0:
+                self.f_variant_type.setCurrentIndex(idx)
+            radio = self._variant_radios.get(age_category)
+            if radio:
+                radio.setChecked(True)
+            self.f_has_variants.setChecked(True)
+        self.f_item_code.setReadOnly(True)
+        self.f_auto_barcode.setVisible(False); self.f_barcode.setReadOnly(False)
+        self._toggle_variants(self.f_has_variants.isChecked())
+        self._toggle_color_variants(self.f_has_color_variants.isChecked())
+        self._toggle_custom_variants(self.f_has_custom_variants.isChecked())
+        self._update_tracking_fields(); self.adj_frame.setVisible(False)
+        self._load_batches(); self._load_purchase_log(item_code)
+        self._load_history(); self._load_audit()
         self.tabs.setCurrentIndex(0)
 
-    def _toggle_code(self, state):
+    def _toggle_barcode(self, state):
         if state:
-            self.f_item_code.setText(get_next_item_code(self.db_name))
-            self.f_item_code.setReadOnly(True)
+            self.f_barcode.setText(get_next_ean13(self.db_name))
+            self.f_barcode.setReadOnly(True)
         else:
-            self.f_item_code.clear(); self.f_item_code.setReadOnly(False)
+            self.f_barcode.clear()
+            self.f_barcode.setReadOnly(False)
 
     def _reset_fields(self):
         self._image_blob = b""; self.img_label.clear(); self.img_label.setText("No Image")
+        if hasattr(self, "_variant_pending"):
+            self._variant_pending.clear()
+            self._variant_drafts.clear()
+            self._variant_locked.clear()
+            self._variant_current_group = VARIANT_STORAGE_GROUP
+            self._custom_values.clear()
         for w in self.findChildren(QLineEdit):
             if not w.isReadOnly(): w.clear()
         for w in self.findChildren(QTextEdit):      w.clear()
@@ -3189,6 +4501,12 @@ class ProductFormWidget(QWidget):
         self.f_is_primary.setChecked(True)
         self.f_mfg_date.setDate(QDate.currentDate())
         self.f_expiry_date.setDate(QDate.currentDate().addYears(1))
+        self.f_purchase_date.setDate(QDate.currentDate())
+        self.f_purchase_date.clear()
+        self.purchase_log_table.setRowCount(0)
+        if hasattr(self, "_variant_radios"):
+            self._variant_radios["Generic"].setChecked(True)
+        self._update_tracking_fields()
         self.f_margin.blockSignals(True)
         self.f_margin.setValue(0.0)
         self.f_margin.blockSignals(False)
@@ -3273,8 +4591,10 @@ class ProductFormWidget(QWidget):
         sv(self.f_returnable, "is_returnable");      sv(self.f_warehouse, "warehouse")
         sv(self.f_rack, "rack_location");            sv(self.f_bin, "bin_location")
         sv(self.f_track_batch, "track_batch");       sv(self.f_track_expiry, "track_expiry")
-        sv(self.f_track_serial, "track_serial");     sv(self.f_mfg_date, "mfg_date")
+        sv(self.f_track_mfg, "track_mfg");           sv(self.f_track_serial, "track_serial")
+        sv(self.f_mfg_date, "mfg_date")
         sv(self.f_expiry_date, "expiry_date");       sv(self.f_expiry_alert, "expiry_alert_days", 30)
+        self._update_tracking_fields()
         self._calc_shelf()
         cur = p.get("stock", 0); res = p.get("reserved_stock", 0); dam = p.get("damaged_stock", 0)
         self.lbl_available.setText(str(max(0, (cur or 0) - (res or 0) - (dam or 0))))
@@ -3295,7 +4615,9 @@ class ProductFormWidget(QWidget):
         sv(self.f_last_purchase, "last_purchase_price")
         sv(self.f_weight, "weight_kg");  sv(self.f_length, "length_cm")
         sv(self.f_width, "width_cm");   sv(self.f_height, "height_cm")
-        sv(self.f_has_variants, "has_variants"); sv(self.f_variant_type, "variant_type")
+        if p.get("variant_type") not in (COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP):
+            sv(self.f_has_variants, "has_variants")
+            sv(self.f_variant_type, "variant_type")
         # Compliance
         sv(self.f_fssai, "fssai_number");     sv(self.f_drug_lic, "drug_license_no")
         sv(self.f_is_sched, "is_scheduled_drug"); sv(self.f_sched_type, "schedule_type")
@@ -3306,6 +4628,15 @@ class ProductFormWidget(QWidget):
     def _collect(self) -> dict:
         gst  = self.f_gst_rate.currentText().split("—")[0].strip().split(" ")[0]
         igst = self.f_igst_rate.currentText().split("—")[0].strip().split(" ")[0]
+        if (
+            hasattr(self, "f_has_variants")
+            and (
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            )
+        ):
+            self._sync_variant_total()
         return {
             "item_code":             self.f_item_code.text().strip(),
             "sku":                   self.f_sku.text().strip(),
@@ -3365,11 +4696,12 @@ class ProductFormWidget(QWidget):
             "warehouse":             self.f_warehouse.currentText().strip(),
             "rack_location":         self.f_rack.text().strip(),
             "bin_location":          self.f_bin.text().strip(),
-            "track_batch":           int(self.f_track_batch.isChecked()),
-            "track_expiry":          int(self.f_track_expiry.isChecked()),
-            "track_serial":          int(self.f_track_serial.isChecked()),
-            "mfg_date":              self.f_mfg_date.date().toString("yyyy-MM-dd"),
-            "expiry_date":           self.f_expiry_date.date().toString("yyyy-MM-dd"),
+            "track_batch":           0,
+            "track_expiry":          0,
+            "track_mfg":             0,
+            "track_serial":          0,
+            "mfg_date":              "",
+            "expiry_date":           "",
             "expiry_alert_days":     self.f_expiry_alert.value(),
             "supplier_name":         self.f_supplier_name.currentText().strip(),
             "supplier_code":         self.f_supplier_code.text().strip(),
@@ -3382,8 +4714,18 @@ class ProductFormWidget(QWidget):
             "length_cm":             self.f_length.value(),
             "width_cm":              self.f_width.value(),
             "height_cm":             self.f_height.value(),
-            "has_variants":          int(self.f_has_variants.isChecked()),
-            "variant_type":          self.f_variant_type.currentText().strip(),
+            "has_variants":          int(
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            ),
+            "variant_type":          (
+                CUSTOM_STORAGE_GROUP if self.f_has_custom_variants.isChecked()
+                else (
+                    COLOR_STORAGE_GROUP if self.f_has_color_variants.isChecked()
+                    else self.f_variant_type.currentText().strip()
+                )
+            ),
             "fssai_number":          self.f_fssai.text().strip(),
             "drug_license_no":       self.f_drug_lic.text().strip(),
             "is_scheduled_drug":     int(self.f_is_sched.isChecked()),
@@ -3399,15 +4741,35 @@ class ProductFormWidget(QWidget):
 
     def _save(self):
         data = self._collect()
+        stock_update_qty = self._stock_update_qty()
         if not data["name"]:
             QMessageBox.warning(self, "Validation", "Product name is required.")
             self.tabs.setCurrentIndex(0); self.f_name.setFocus(); return
         if not data["item_code"]:
-            QMessageBox.warning(self, "Validation", "Item code is required.")
+            QMessageBox.warning(self, "Validation", "Product no is required.")
             self.tabs.setCurrentIndex(0); self.f_item_code.setFocus(); return
+        if not data["barcode"]:
+            QMessageBox.warning(self, "Validation", "Barcode / EAN is required.")
+            self.tabs.setCurrentIndex(0); self.f_barcode.setFocus(); return
         if data["selling_price"] <= 0:
             QMessageBox.warning(self, "Validation", "Selling price must be > 0.")
             self.tabs.setCurrentIndex(1); self.f_selling_price.setFocus(); return
+        if self.f_has_variants.isChecked() and self._variant_radio_group.checkedButton() is None:
+            QMessageBox.warning(self, "Validation", "Age Category is required.")
+            self.tabs.setCurrentIndex(2); return
+        if self.f_has_custom_variants.isChecked() and not self._custom_values:
+            QMessageBox.warning(
+                self, "Validation", "Add at least one custom variant."
+            )
+            self.tabs.setCurrentIndex(2)
+            self.f_custom_variant.setFocus()
+            return
+        if stock_update_qty > 0 and not self.f_purchase_invoice.text().strip():
+            QMessageBox.warning(self, "Validation", "Purchase invoice number is required for stock updates.")
+            self.tabs.setCurrentIndex(2); self.f_purchase_invoice.setFocus(); return
+        if stock_update_qty > 0 and not self.f_purchase_date.text().strip():
+            QMessageBox.warning(self, "Validation", "Date of purchase is required for stock updates.")
+            self.tabs.setCurrentIndex(2); self.f_purchase_date.setFocus(); return
         if data["mrp"] > 0 and data["selling_price"] > data["mrp"]:
             if QMessageBox.question(self, "Warning",
                 f"Selling price ₹{data['selling_price']:.2f} exceeds MRP ₹{data['mrp']:.2f}.\nContinue?",
@@ -3417,12 +4779,76 @@ class ProductFormWidget(QWidget):
         if self.edit_code:
             d = dict(data); d.pop("item_code", None); d.pop("opening_stock", None)
             update_product(self.db_name, self.edit_code, d, self.current_user)
+            if (
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            ):
+                color_mode = self.f_has_color_variants.isChecked()
+                custom_mode = self.f_has_custom_variants.isChecked()
+                storage_group = (
+                    CUSTOM_STORAGE_GROUP if custom_mode
+                    else COLOR_STORAGE_GROUP if color_mode
+                    else VARIANT_STORAGE_GROUP
+                )
+                delete_other_variant_mode(self.db_name, self.edit_code, storage_group)
+                total = save_product_variants(
+                    self.db_name, self.edit_code,
+                    CUSTOM_STORAGE_GROUP if custom_mode
+                    else COLOR_STORAGE_GROUP if color_mode
+                    else self.f_variant_type.currentText().strip(),
+                    self._custom_rows() if custom_mode
+                    else self._color_rows() if color_mode
+                    else self._variant_rows()
+                )
+                self.lbl_available.setText(str(total))
+                self._variant_pending.clear()
+                self._variant_drafts.clear()
+                self._variant_locked.clear()
+                if custom_mode:
+                    self._rebuild_custom_table()
+                elif color_mode:
+                    self._rebuild_color_tables()
+                else:
+                    self._rebuild_variant_table()
+            else:
+                delete_product_variants(self.db_name, self.edit_code)
+            self._save_purchase_entry(self.edit_code, stock_update_qty)
             self._save_supplier_link(self.edit_code)
             self.saved.emit(self.edit_code)
         else:
             if not save_product(self.db_name, data, self.current_user):
-                QMessageBox.critical(self, "Error", "Could not save.\nItem code may already exist.")
+                QMessageBox.critical(self, "Error", "Could not save.\nProduct no may already exist.")
                 return
+            if (
+                self.f_has_variants.isChecked()
+                or self.f_has_color_variants.isChecked()
+                or self.f_has_custom_variants.isChecked()
+            ):
+                color_mode = self.f_has_color_variants.isChecked()
+                custom_mode = self.f_has_custom_variants.isChecked()
+                total = save_product_variants(
+                    self.db_name, data["item_code"],
+                    CUSTOM_STORAGE_GROUP if custom_mode
+                    else COLOR_STORAGE_GROUP if color_mode
+                    else self.f_variant_type.currentText().strip(),
+                    self._custom_rows() if custom_mode
+                    else self._color_rows() if color_mode
+                    else self._variant_rows()
+                )
+                self.lbl_available.setText(str(total))
+                self._variant_pending.clear()
+                self._variant_drafts.clear()
+                self._variant_locked.clear()
+                self.edit_code = data["item_code"]
+                if custom_mode:
+                    self._rebuild_custom_table()
+                elif color_mode:
+                    self._rebuild_color_tables()
+                else:
+                    self._rebuild_variant_table()
+                self.edit_code = None
+            self._save_purchase_entry(data["item_code"], stock_update_qty)
             self._save_supplier_link(data["item_code"])
             self.saved.emit(data["item_code"])
 
@@ -3867,8 +5293,8 @@ class ProductListWidget(QWidget):
             sti.setForeground(QBrush(QColor(sc[1])))
             tbl.setItem(r, 10, sti)
 
-            act = _item("✏️  ±  🗑", C_CTR)
-            act.setToolTip("Click to Edit | Adjust Stock | Delete")
+            act = _item("✏️  🗑", C_CTR)
+            act.setToolTip("Click to Edit or Delete")
             act.setForeground(QBrush(QColor(C["text2"])))
             tbl.setItem(r, 11, act)
 
@@ -3893,22 +5319,14 @@ class ProductListWidget(QWidget):
         msg.setWindowTitle(f"Actions — {name}")
         msg.setText(f"<b>{name}</b>  ({code})\nChoose an action:")
         edit_btn = msg.addButton("✏️  Edit",        QMessageBox.ButtonRole.ActionRole)
-        adj_btn  = msg.addButton("±  Adjust Stock", QMessageBox.ButtonRole.ActionRole)
         del_btn  = msg.addButton("🗑  Delete",       QMessageBox.ButtonRole.DestructiveRole)
         msg.addButton("Cancel",                      QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked == edit_btn:
             self._on_edit(code)
-        elif clicked == adj_btn:
-            self._stock_adj(code, name, stock)
         elif clicked == del_btn:
             self._confirm_delete(code)
-
-    def _stock_adj(self, code, name, stock):
-        dlg = StockAdjDialog(self.db_name, code, name, stock, self.current_user, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._load_table()
 
     def _confirm_delete(self, item_code):
         reply = QMessageBox.question(
@@ -4005,33 +5423,3 @@ class ProductPage(QWidget):
         self._panel.slide_out()
 
 
-# ─────────────────────────────────────────────────────────────
-#  STANDALONE TEST
-# ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    db_files = glob.glob("*.db")
-    DB = db_files[0] if db_files else "evo_aura.db"
-
-    company_name = "Evo Aura"
-    try:
-        from new_claude import load_company_info, init_db
-        init_db(DB)
-        info = load_company_info(DB)
-        if info.get("company_name"):
-            company_name = info["company_name"]
-    except Exception:
-        pass
-
-    win = ProductPage(
-        DB,
-        company_name = company_name,
-        current_user = "Admin",
-        embedded     = False,
-    )
-    win.setWindowTitle(f"Evo Aura — Products ({company_name})")
-    win.resize(1280, 800)
-    win.show()
-    sys.exit(app.exec())

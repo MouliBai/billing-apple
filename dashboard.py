@@ -1480,14 +1480,3 @@ class Dashboard(QWidget):
 # ─────────────────────────────────────────────────────────────
 #  STANDALONE ENTRY POINT
 # ─────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    # Use a real DB path if you have one, otherwise runs with empty data
-    DB = "billing.db"
-
-    win = Dashboard(db_name=DB, username="Admin")
-    win.show()
-    sys.exit(app.exec_())

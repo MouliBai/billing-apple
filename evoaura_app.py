@@ -1342,6 +1342,129 @@ class _ContentPage(QWidget):
 
 
 # ──────────────────────────────────────────────────────────────
+#  DASHBOARD HOME PAGE
+# ──────────────────────────────────────────────────────────────
+class _DashboardPage(QWidget):
+    """Dashboard home page with quick-access cards for every module."""
+
+    _CARDS = [
+        ("🧾", "New Sale",        "sale"),
+        ("📦", "Products",        "product"),
+        ("🚚", "Suppliers",       "suppliers"),
+        ("🛒", "Purchase Orders", "purchase_orders"),
+        ("⚠️",  "Low Stock",      "low_stock"),
+        ("👥", "Customers",       "customers"),
+        ("💳", "Credit Mgmt",     "credit"),
+        ("💰", "P & L Summary",   "pl_summary"),
+        ("💸", "Expenses",        "expenses"),
+        ("🧾", "GST Breakdown",   "gst"),
+        ("📊", "Day Book",        "day_book"),
+        ("📤", "Export",          "export"),
+    ]
+
+    def __init__(self, navigate_cb, company_name: str = "", username: str = "",
+                 parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background:{C['bg_light']};")
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background:transparent; border:none;")
+
+        inner = QWidget()
+        inner.setStyleSheet("background:transparent;")
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(32, 28, 32, 32)
+        root.setSpacing(24)
+
+        # ── Welcome banner ─────────────────────────────────────
+        banner = QFrame()
+        banner.setFixedHeight(88)
+        banner.setStyleSheet(
+            f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {C['accent']},stop:1 {C['accent_dark']});"
+            f"border-radius:14px;}}")
+        bl = QHBoxLayout(banner)
+        bl.setContentsMargins(28, 0, 28, 0)
+
+        greet_col = QVBoxLayout(); greet_col.setSpacing(2)
+        name_disp = company_name or "EvoAura"
+        greet_col.addWidget(L(f"Welcome back, {username} 👋", 11, col="#ffd6db"))
+        greet_col.addWidget(L(name_disp, 20, col="#ffffff", bold=True))
+        bl.addLayout(greet_col)
+        bl.addStretch()
+
+        badge = QLabel("⚡ EvoAura")
+        badge.setFont(F(13, bold=True))
+        badge.setStyleSheet(
+            "color:white;background:rgba(255,255,255,0.18);"
+            "border-radius:10px;padding:5px 14px;")
+        bl.addWidget(badge)
+        root.addWidget(banner)
+
+        # ── Section header ─────────────────────────────────────
+        hdr = L("Quick Access", 13, col=C["text2"], bold=True)
+        root.addWidget(hdr)
+
+        # ── Cards grid ─────────────────────────────────────────
+        grid_w = QWidget(); grid_w.setStyleSheet("background:transparent;")
+        grid = QGridLayout(grid_w)
+        grid.setSpacing(14)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        cols = 4
+        for i, (icon, label, key) in enumerate(self._CARDS):
+            card = QPushButton()
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setFixedHeight(90)
+            card.setStyleSheet(f"""
+                QPushButton {{
+                    background:{C['bg_white']};
+                    border:1px solid {C['border']};
+                    border-radius:12px;
+                    text-align:left;
+                    padding:14px 16px;
+                    font-size:13px;
+                    color:{C['text']};
+                    font-weight:600;
+                }}
+                QPushButton:hover {{
+                    border:1.5px solid {C['accent']};
+                    background:{C['accent_tint']};
+                }}
+                QPushButton:pressed {{
+                    background:{C['accent_tint2']};
+                }}
+            """)
+
+            card_lay = QVBoxLayout(card)
+            card_lay.setContentsMargins(14, 12, 14, 10)
+            card_lay.setSpacing(6)
+
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFont(F(22))
+            icon_lbl.setStyleSheet("background:transparent; border:none;")
+            card_lay.addWidget(icon_lbl)
+
+            name_lbl = QLabel(label)
+            name_lbl.setFont(F(12, bold=True))
+            name_lbl.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
+            card_lay.addWidget(name_lbl)
+
+            card.clicked.connect(lambda _=False, k=key: navigate_cb(k))
+            grid.addWidget(card, i // cols, i % cols)
+
+        root.addWidget(grid_w)
+        root.addStretch()
+
+        scroll.setWidget(inner)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+
+# ──────────────────────────────────────────────────────────────
 #  PAGE REGISTRY
 # ──────────────────────────────────────────────────────────────
 _PAGE_META: dict[str, tuple[str, str]] = {
@@ -1349,6 +1472,7 @@ _PAGE_META: dict[str, tuple[str, str]] = {
     "sale":             ("🛒", "New Sale"),
     "returns":          ("↩️", "Returns"),
     "bill_view":        ("🧾", "Bill View"),
+    "product":          ("📦", "Products"),
     "products":         ("📦", "Products"),
     "purchase_orders":  ("📋", "Purchase Orders"),
     "suppliers":        ("🏭", "Suppliers"),
@@ -1470,20 +1594,41 @@ class AppShell(QWidget):
                    db_name.replace(".db", "").replace("_", " ").title())
         self._sidebar.set_company(display)
 
-        icon, title = _PAGE_META.get("home", ("🏠", "Home"))
-        home_page = _ContentPage(title, icon)
+        self._username = username
+        self._company_display = (company_name.strip() or
+                                  db_name.replace(".db", "").replace("_", " ").title())
+
+        home_page = _DashboardPage(
+            navigate_cb  = self._show_page,
+            company_name = self._company_display,
+            username     = username,
+        )
         self._pages["home"] = home_page
         self._stack.addWidget(home_page)
         self._sidebar.set_active("home")
         self._show_page("home")
 
     def _on_navigate(self, key: str):
-        self._current_key = key
         self._show_page(key)
 
+    def _canonical_key(self, key: str) -> str:
+        return "product" if key == "products" else key
+
+    def _discard_page(self, key: str):
+        page = self._pages.pop(key, None)
+        if not page:
+            return
+        self._stack.removeWidget(page)
+        page.deleteLater()
+
     def _show_page(self, key: str):
+        key = self._canonical_key(key)
+        self._current_key = key
         _, title = _PAGE_META.get(key, ("📄", key.replace("_", " ").title()))
         self._page_title.setText(title)
+
+        if key != "home" and key in self._pages:
+            self._discard_page(key)
 
         if key not in self._pages:
             page = self._build_page(key)
@@ -1491,6 +1636,7 @@ class AppShell(QWidget):
             self._stack.addWidget(page)
 
         self._stack.setCurrentWidget(self._pages[key])
+        self._sidebar.set_active(key)
 
     def _build_page(self, key: str) -> QWidget:
         """
@@ -1501,8 +1647,12 @@ class AppShell(QWidget):
         db = getattr(self, "_db_name", "")
 
         # ── Real pages ────────────────────────────────────────
-        if key == "products":
+        if key in ("product", "products"):
             return ProductPage(db_name=db)
+
+        if key == "suppliers":
+            from supplier_page import SupplierPage
+            return SupplierPage(db_name=db)
 
         # ── Placeholder for all other keys ────────────────────
         icon, title_text = _PAGE_META.get(key, ("📄", key.replace("_", " ").title()))

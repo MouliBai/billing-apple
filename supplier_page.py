@@ -24,6 +24,7 @@ from PyQt6.QtGui   import QFont, QColor
 # ── mirror product_page color tokens ───────────────────────────────────────────
 try:
     from product_page import C, _F, FIELD_SS, LABEL_SS, SEC_HDR_SS, _NO_ARROW, ToggleSwitch
+    from product_page import _apply_combo_delegate
     from product_page import init_product_table
 except ImportError:
     # Fallback standalone tokens
@@ -45,6 +46,7 @@ except ImportError:
     SEC_HDR_SS= f"font-size:14px;font-weight:700;color:#1D1D1F;background:transparent;border:none;"
     _NO_ARROW = ""
     ToggleSwitch = None
+    def _apply_combo_delegate(cb): pass
     def init_product_table(db, user): pass
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,26 +130,59 @@ def init_supplier_tables(db):
             ("city","TEXT DEFAULT ''"), ("state","TEXT DEFAULT ''"),
             ("pincode","TEXT DEFAULT ''"), ("contact_person","TEXT DEFAULT ''"),
             ("credit_limit","REAL DEFAULT 0"), ("notes","TEXT DEFAULT ''"),
+            ("payment_terms_days","INTEGER DEFAULT 30"),
+            ("current_balance","REAL DEFAULT 0"),
+            ("status","TEXT DEFAULT 'Active'"),
+            ("created_by","TEXT DEFAULT 'system'"),
         ]:
             try: conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {defn}")
             except: pass
         for col, defn in [
             ("sold_qty","INTEGER DEFAULT 0"), ("mrp","REAL DEFAULT 0"),
             ("supplier_code","TEXT DEFAULT ''"),
+            ("batch_no","TEXT DEFAULT ''"),
+            ("manufacture_date","TEXT DEFAULT ''"),
+            ("created_at","TEXT DEFAULT ''"),
         ]:
             try: conn.execute(f"ALTER TABLE batches ADD COLUMN {col} {defn}")
             except: pass
+        try:
+            conn.execute(
+                "UPDATE batches SET batch_no=batch_number "
+                "WHERE (batch_no IS NULL OR batch_no='') AND batch_number IS NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "UPDATE batches SET manufacture_date=mfg_date "
+                "WHERE (manufacture_date IS NULL OR manufacture_date='') AND mfg_date IS NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "UPDATE batches SET created_at=received_date "
+                "WHERE (created_at IS NULL OR created_at='') AND received_date IS NOT NULL"
+            )
+        except Exception:
+            pass
 
 def get_suppliers(db, search=""):
     like = f"%{search}%"
     return _q(db, """
         SELECT s.*,
-               COUNT(DISTINCT ps.product_code)         AS total_products,
+               COUNT(DISTINCT COALESCE(ps.product_code, p.item_code)) AS total_products,
                COALESCE(SUM(b.qty - COALESCE(b.sold_qty,0)),0)  AS total_stock,
                COALESCE(SUM(b.qty * b.purchase_price),0)         AS stock_value,
                MAX(ps.last_ordered_date)               AS last_order
         FROM suppliers s
         LEFT JOIN product_suppliers ps ON ps.supplier_code = s.code
+        LEFT JOIN products p ON lower(p.supplier_name) = lower(s.name)
+                            AND NOT EXISTS (
+                                SELECT 1 FROM product_suppliers ps2
+                                WHERE ps2.product_code = p.item_code
+                            )
         LEFT JOIN batches b ON b.supplier_code = s.code
         WHERE s.name LIKE ? OR s.code LIKE ? OR s.phone LIKE ?
               OR s.gstin LIKE ? OR s.city LIKE ?
@@ -156,34 +191,40 @@ def get_suppliers(db, search=""):
     """, (like,)*5)
 
 def save_supplier(db, data: dict, user="system"):
+    init_supplier_tables(db)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     import time
     code = data.get("code") or ("SUP" + str(int(time.time()))[-7:])
     try:
         with sqlite3.connect(db) as conn:
-            conn.execute("""
-                INSERT INTO suppliers(code,name,gstin,contact_person,phone,email,
-                    address,city,state,pincode,payment_terms_days,credit_limit,
-                    status,notes,created_at,created_by)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(code) DO UPDATE SET
-                    name=excluded.name, gstin=excluded.gstin,
-                    contact_person=excluded.contact_person, phone=excluded.phone,
-                    email=excluded.email, address=excluded.address,
-                    city=excluded.city, state=excluded.state,
-                    pincode=excluded.pincode,
-                    payment_terms_days=excluded.payment_terms_days,
-                    credit_limit=excluded.credit_limit,
-                    status=excluded.status, notes=excluded.notes
-            """, (code, data.get("name",""), data.get("gstin",""),
-                  data.get("contact_person",""), data.get("phone",""),
-                  data.get("email",""), data.get("address",""),
-                  data.get("city",""), data.get("state",""),
-                  data.get("pincode",""),
-                  int(data.get("payment_terms_days",30) or 30),
-                  float(data.get("credit_limit",0) or 0),
-                  data.get("status","Active"), data.get("notes",""),
-                  now, user))
+            values = (
+                data.get("name",""), data.get("gstin",""),
+                data.get("contact_person",""), data.get("phone",""),
+                data.get("email",""), data.get("address",""),
+                data.get("city",""), data.get("state",""),
+                data.get("pincode",""),
+                int(data.get("payment_terms_days",30) or 30),
+                float(data.get("credit_limit",0) or 0),
+                data.get("status","Active"), data.get("notes",""),
+            )
+            exists = conn.execute(
+                "SELECT 1 FROM suppliers WHERE code=? LIMIT 1", (code,)
+            ).fetchone()
+            if exists:
+                conn.execute("""
+                    UPDATE suppliers SET
+                        name=?, gstin=?, contact_person=?, phone=?, email=?,
+                        address=?, city=?, state=?, pincode=?,
+                        payment_terms_days=?, credit_limit=?, status=?, notes=?
+                    WHERE code=?
+                """, values + (code,))
+            else:
+                conn.execute("""
+                    INSERT INTO suppliers(code,name,gstin,contact_person,phone,email,
+                        address,city,state,pincode,payment_terms_days,credit_limit,
+                        status,notes,created_at,created_by)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (code,) + values + (now, user))
             conn.commit()
         return code
     except Exception as e:
@@ -191,6 +232,8 @@ def save_supplier(db, data: dict, user="system"):
 
 def get_supplier_inventory(db, sup_code):
     """All products + their batches for this supplier."""
+    sup = _qone(db, "SELECT name FROM suppliers WHERE code=?", (sup_code,))
+    sup_name = sup.get("name", "")
     products = _q(db, """
         SELECT ps.product_code, p.name AS product_name,
                ps.supplier_product_code AS sup_sku,
@@ -218,6 +261,29 @@ def get_supplier_inventory(db, sup_code):
             WHERE product_code=? AND supplier_code=?
             ORDER BY expiry_date ASC, created_at DESC
         """, (prod["product_code"], sup_code))
+
+    linked_codes = {p.get("product_code") for p in products}
+    if sup_name:
+        legacy_products = _q(db, """
+            SELECT p.item_code AS product_code, p.name AS product_name,
+                   p.supplier_code AS sup_sku,
+                   p.last_purchase_price AS unit_price,
+                   1 AS moq,
+                   p.lead_time_days AS lead_time_days,
+                   0 AS is_primary,
+                   '' AS last_ordered_date,
+                   p.stock AS available_stock,
+                   p.opening_stock AS total_received,
+                   0 AS total_sold
+            FROM products p
+            WHERE lower(p.supplier_name) = lower(?)
+            ORDER BY p.name
+        """, (sup_name,))
+        for prod in legacy_products:
+            if prod.get("product_code") in linked_codes:
+                continue
+            prod["batches"] = []
+            products.append(prod)
     return products
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,15 +359,24 @@ class _SlidePanel(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.setVisible(False)
+        self._open = False
         self._anim = QPropertyAnimation(self, b"geometry", self)
         self._anim.setDuration(280)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _clear_anim_finished(self):
+        try:
+            self._anim.finished.disconnect()
+        except TypeError:
+            pass
 
     def resize_to_parent(self):
         p = self.parent()
         if p: self.setGeometry(0, 0, p.width(), p.height())
 
     def slide_in(self):
+        self._clear_anim_finished()
+        self._open = True
         self.resize_to_parent(); self.setVisible(True); self.raise_()
         p = self.parent(); W = p.width() if p else 1200; H = p.height() if p else 800
         self._anim.setStartValue(QRect(W, 0, W, H))
@@ -309,6 +384,10 @@ class _SlidePanel(QWidget):
         self._anim.start()
 
     def slide_out(self):
+        if not self._open and not self.isVisible():
+            return
+        self._clear_anim_finished()
+        self._open = False
         p = self.parent(); W = p.width() if p else 1200; H = p.height() if p else 800
         self._anim.setStartValue(QRect(0, 0, W, H))
         self._anim.setEndValue(QRect(W, 0, W, H))
@@ -454,8 +533,66 @@ class SupplierDetailWidget(QWidget):
             self._body_lay.addWidget(empty)
             return
 
-        inv_title = _section_lbl("Product Inventory", "📊")
+        inv_title = _section_lbl("Linked Products", "📊")
         self._body_lay.addWidget(inv_title)
+
+        table_card = _card_frame()
+        tc_lay = QVBoxLayout(table_card)
+        tc_lay.setContentsMargins(16, 14, 16, 16)
+        tc_lay.setSpacing(10)
+
+        table = QTableWidget(len(prods), 11)
+        table.setHorizontalHeaderLabels([
+            "Product Code", "Product", "Primary", "Supplier SKU",
+            "Available", "Received", "Sold", "Last Price",
+            "MOQ", "Lead", "Last Order"
+        ])
+        table.setStyleSheet(_TABLE_SS)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(True)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        hdr = table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        for r, prod in enumerate(prods):
+            table.setRowHeight(r, 42)
+            avail = prod.get("available_stock", 0) or 0
+            values = [
+                prod.get("product_code", "") or "",
+                prod.get("product_name", "") or "",
+                "Yes" if prod.get("is_primary") else "",
+                prod.get("sup_sku", "") or "",
+                str(avail),
+                str(prod.get("total_received", 0) or 0),
+                str(prod.get("total_sold", 0) or 0),
+                f"₹{(prod.get('unit_price') or 0):,.2f}",
+                str(prod.get("moq", 1) or 1),
+                f"{prod.get('lead_time_days') or 0}d",
+                (prod.get("last_ordered_date", "") or "")[:10] or "—",
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                if c in (4, 5, 6, 8):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 2 and value:
+                    item.setForeground(QColor(C["success"]))
+                if c == 4:
+                    item.setForeground(QColor(C["success"] if avail > 0 else C["accent"]))
+                if c == 7:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(r, c, item)
+
+        table.setFixedHeight(min(44 * len(prods) + 46, 420))
+        tc_lay.addWidget(table)
+        self._body_lay.addWidget(table_card)
+        self._body_lay.addStretch()
+        return
 
         for prod in prods:
             pcard = _card_frame()
@@ -623,18 +760,39 @@ class SupplierFormWidget(QWidget):
             hd = QLabel(f"{icon}  {title}"); hd.setStyleSheet(SEC_HDR_SS)
             sl.addWidget(hd); sl.addWidget(_sep_line())
             g = QGridLayout(); g.setHorizontalSpacing(12); g.setVerticalSpacing(10)
+            g.setColumnMinimumWidth(0, 124)
+            g.setColumnMinimumWidth(2, 124)
             g.setColumnStretch(1,1); g.setColumnStretch(3,1)
             sl.addLayout(g)
             return sec, g
 
+        def _normalize_field(widget):
+            widget.setFixedHeight(38)
+            widget.setMinimumWidth(260)
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            existing = widget.styleSheet()
+            if isinstance(widget, (QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox)):
+                widget.setStyleSheet(FIELD_SS + existing)
+
         def _add(g, r, c, label, widget, span=1, hint="", req=False):
+            _normalize_field(widget)
             lbl_text = f"{label} {'*' if req else ''}"
             lbl = QLabel(lbl_text); lbl.setStyleSheet(LABEL_SS)
+            lbl.setMinimumWidth(118)
             g.addWidget(lbl, r, c*2)
             if hint:
-                wrap = QWidget(); wl = QVBoxLayout(wrap); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
+                wrap = QWidget()
+                wrap.setStyleSheet("background:transparent;border:none;")
+                wl = QVBoxLayout(wrap); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
                 wl.addWidget(widget)
-                hl = QLabel(hint); hl.setStyleSheet(f"font-size:10px;color:{C['text3']};background:transparent;border:none;")
+                hl = QLabel(hint)
+                hl.setStyleSheet(
+                    f"font-size:10px;color:{C['text3']};"
+                    f"background:transparent;border:none;padding:0;margin:0;"
+                )
                 wl.addWidget(hl)
                 g.addWidget(wrap, r, c*2+1, 1, span*2-1)
             else:
@@ -648,14 +806,14 @@ class SupplierFormWidget(QWidget):
 
         # ── Section 1: Basic Info ─────────────────────────────
         sec1, g1 = _sec("Basic Information", "🏭")
-        self.f_name    = _le("e.g. Raymond Ltd"); self.f_code = _le("Auto-generated")
-        self.f_code.setReadOnly(True)
+        self.f_name    = _le("e.g. Raymond Ltd"); self.f_code = _le("e.g. SUP0001")
         self.f_contact = _le("Contact person name")
         self.f_status  = QComboBox(); self.f_status.addItems(["Active","Inactive","Blacklisted"])
         self.f_status.setFixedHeight(38)
+        _apply_combo_delegate(self.f_status)
         _add(g1, 0, 0, "Supplier Name", self.f_name, req=True)
         _add(g1, 0, 1, "Status",        self.f_status)
-        _add(g1, 1, 0, "Supplier Code", self.f_code, hint="Auto-generated on save")
+        _add(g1, 1, 0, "Supplier Code", self.f_code, hint="Leave blank to auto-generate on save")
         _add(g1, 1, 1, "Contact Person",self.f_contact)
         bl.addWidget(sec1)
 
@@ -687,6 +845,7 @@ class SupplierFormWidget(QWidget):
         self.f_terms  = QSpinBox(); self.f_terms.setRange(0,365); self.f_terms.setSuffix(" days"); self.f_terms.setFixedHeight(38); self.f_terms.setStyleSheet(_NO_ARROW)
         self.f_credit = QDoubleSpinBox(); self.f_credit.setRange(0,99999999); self.f_credit.setPrefix("₹ "); self.f_credit.setFixedHeight(38); self.f_credit.setStyleSheet(_NO_ARROW)
         self.f_notes  = QTextEdit(); self.f_notes.setFixedHeight(68); self.f_notes.setPlaceholderText("Additional notes about this supplier…")
+        self.f_notes.setStyleSheet(FIELD_SS)
         _add(g4, 0, 0, "Payment Terms", self.f_terms)
         _add(g4, 0, 1, "Credit Limit",  self.f_credit)
         lbl_notes = QLabel("Notes"); lbl_notes.setStyleSheet(LABEL_SS)
@@ -732,7 +891,7 @@ class SupplierFormWidget(QWidget):
             QMessageBox.warning(self, "Required", "Supplier Name is required.")
             return
         data = dict(
-            code            = self._edit_code,
+            code            = self.f_code.text().strip() or self._edit_code,
             name            = name,
             gstin           = self.f_gstin.text().strip(),
             contact_person  = self.f_contact.text().strip(),
