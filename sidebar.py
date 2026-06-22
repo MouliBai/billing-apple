@@ -77,10 +77,10 @@ NAV_ITEMS = [
         ("product",      "Products",          "products"),
         ("purchase_orders","Purchase Invoices", "purchase_orders"),
         ("suppliers",     "Suppliers",         "suppliers"),
-        ("low_stock",     "Low Stock",         "low_stock"),
+        ("low_stock",     "Reorder Control",   "low_stock"),
     ]),
     ("Customers", [
-        ("customer",     "Customers",         "customers"),
+        ("customer",     "Customer Center",   "customers"),
         ("credit",        "Credit Mgmt",       "credit"),
         ("loyalty",       "Loyalty",           "loyalty"),
     ]),

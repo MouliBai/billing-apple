@@ -32,6 +32,8 @@ from PyQt6.QtGui  import QFont, QColor, QPalette, QPixmap, QImage
 from sidebar import Sidebar
 from product_page import ProductPage
 from purchase_orders_page import PurchaseOrdersPage
+from low_stock_page import LowStockPage
+from customer_page import CustomerPage
 from input_behavior import ensure_global_input_guard
 from app_branding import apply_app_icon
 
@@ -1668,6 +1670,15 @@ class AppShell(QWidget):
         if key == "purchase_orders":
             return PurchaseOrdersPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
+
+        if key == "low_stock":
+            return LowStockPage(
+                db_name=db, current_user=getattr(self, "_username", "Admin"))
+
+        if key == "customers":
+            return CustomerPage(
+                db_name=db, current_user=getattr(self, "_username", "Admin"),
+                navigate_cb=self._show_page)
 
         # ── Placeholder for all other keys ────────────────────
         icon, title_text = _PAGE_META.get(key, ("📄", key.replace("_", " ").title()))

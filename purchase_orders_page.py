@@ -189,13 +189,15 @@ def purchase_kpis(db):
 
 
 class PurchaseInvoiceDialog(QDialog):
-    def __init__(self, db, current_user="Admin", parent=None, invoice=None):
+    def __init__(self, db, current_user="Admin", parent=None, invoice=None,
+                 prefill=None):
         super().__init__(parent)
         apply_app_icon(self)
         ensure_global_input_guard()
         self.db = db
         self.current_user = current_user
         self.invoice = invoice
+        self.prefill = prefill or {}
         self.products = _rows(
             db, "SELECT * FROM products WHERE is_deleted=0 ORDER BY name")
         self.product_map = {
@@ -290,6 +292,29 @@ class PurchaseInvoiceDialog(QDialog):
         self.supplier.currentTextChanged.connect(self._supplier_changed)
         self.purchase_date.dateChanged.connect(self._supplier_changed)
         self._add_line()
+        self._apply_prefill()
+
+    def _apply_prefill(self):
+        if not self.prefill:
+            return
+        supplier_code = self.prefill.get("supplier_code")
+        supplier = next(
+            (row for row in self.suppliers if row.get("code") == supplier_code), None)
+        if supplier:
+            self.supplier.setCurrentText(supplier.get("name") or "")
+        product_code = self.prefill.get("product_code")
+        product_key = next(
+            (key for key, row in self.product_map.items()
+             if row.get("item_code") == product_code), None)
+        if product_key:
+            combo = self.lines.cellWidget(0, 0)
+            combo.setCurrentText(product_key)
+            self.lines.cellWidget(0, 5).setValue(
+                int(self.prefill.get("quantity") or 1))
+            price = float(self.prefill.get("purchase_price") or 0)
+            if price:
+                self.lines.cellWidget(0, 6).setValue(price)
+        self._recalc()
 
     def _supplier_changed(self, *_):
         supplier = self.supplier_map.get(self.supplier.currentText(), {})
@@ -704,4 +729,3 @@ class PurchaseOrdersPage(QWidget):
             for col, value in enumerate(values):
                 self.drawer_items.setItem(row, col, QTableWidgetItem(str(value)))
         self.drawer.show()
-
