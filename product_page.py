@@ -20,7 +20,8 @@ A semi-transparent scrim dims the list behind it.
 import sys
 import glob
 import sqlite3
-from datetime import datetime
+from html import escape
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -30,10 +31,10 @@ from PyQt6.QtWidgets import (
     QCheckBox, QRadioButton, QButtonGroup, QTabWidget, QScrollArea, QDateEdit, QDoubleSpinBox,
     QSpinBox, QTextEdit, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyle,
-    QStackedWidget, QDialog, QVBoxLayout, QFileDialog, QToolButton,
+    QStackedWidget, QDialog, QVBoxLayout, QFileDialog, QToolButton, QMenu,
 )
 from PyQt6.QtGui  import (
-    QFont, QColor, QBrush, QPainter, QLinearGradient,
+    QFont, QColor, QBrush, QPainter, QPen, QLinearGradient,
     QPixmap, QPalette,
 )
 from PyQt6.QtCore import (
@@ -636,6 +637,7 @@ def init_product_table(db_name, current_user="system"):
             purchase_date TEXT DEFAULT '',
             quantity INTEGER DEFAULT 0,
             purchase_price REAL DEFAULT 0,
+            selling_price REAL DEFAULT 0,
             gst_rate REAL DEFAULT 0,
             discount_amount REAL DEFAULT 0,
             gross_amount REAL DEFAULT 0,
@@ -781,6 +783,17 @@ def init_product_table(db_name, current_user="system"):
         except Exception:
             pass
 
+    c.execute("PRAGMA table_info(purchase_invoice_logs)")
+    purchase_log_existing = {r[1] for r in c.fetchall()}
+    if "selling_price" not in purchase_log_existing:
+        try:
+            c.execute(
+                "ALTER TABLE purchase_invoice_logs "
+                "ADD COLUMN selling_price REAL DEFAULT 0"
+            )
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
     _initialized_dbs.add(db_name)
@@ -791,31 +804,88 @@ def init_product_table(db_name, current_user="system"):
 def get_all_products(db_name, filters=None):
     filters = filters or {}
     conn = sqlite3.connect(db_name)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     sql = """
-        SELECT item_code, name, category, unit, selling_price, mrp,
-               stock, reorder_level, status,
-               last_sold_date, purchase_price, brand
-        FROM products WHERE is_deleted=0
+        SELECT p.*,
+               COALESCE(
+                   (SELECT s.name
+                    FROM product_suppliers ps
+                    LEFT JOIN suppliers s ON s.code=ps.supplier_code
+                    WHERE ps.product_code=p.item_code
+                    ORDER BY ps.is_primary DESC, ps.id DESC LIMIT 1),
+                   p.supplier_name, ''
+               ) AS list_supplier,
+               COALESCE(
+                   (SELECT pil.purchase_date
+                    FROM purchase_invoice_logs pil
+                    WHERE pil.product_code=p.item_code
+                    ORDER BY pil.purchase_date DESC, pil.id DESC LIMIT 1),
+                   ''
+               ) AS list_last_purchase_date,
+               COALESCE(
+                   (SELECT pil.invoice_number
+                    FROM purchase_invoice_logs pil
+                    WHERE pil.product_code=p.item_code
+                    ORDER BY pil.purchase_date DESC, pil.id DESC LIMIT 1),
+                   ''
+               ) AS list_last_invoice
+        FROM products p WHERE p.is_deleted=0
     """
     params = []
     if filters.get("status") and filters["status"] != "All":
-        sql += " AND status=?"; params.append(filters["status"])
+        sql += " AND p.status=?"; params.append(filters["status"])
     if filters.get("category") and filters["category"] not in ("All", ""):
-        sql += " AND category=?"; params.append(filters["category"])
+        sql += " AND p.category=?"; params.append(filters["category"])
     if filters.get("stock_filter") == "Low Stock":
-        sql += " AND stock <= reorder_level AND reorder_level > 0"
+        sql += " AND p.stock <= p.reorder_level AND p.reorder_level > 0"
     elif filters.get("stock_filter") == "Out of Stock":
-        sql += " AND stock = 0"
+        sql += " AND p.stock = 0"
     if filters.get("search"):
         q = f"%{filters['search']}%"
-        sql += " AND (item_code LIKE ? OR name LIKE ? OR alias_names LIKE ? OR barcode LIKE ?)"
-        params += [q, q, q, q]
-    sql += " ORDER BY name"
+        sql += """ AND (
+            p.item_code LIKE ? OR p.name LIKE ? OR p.alias_names LIKE ?
+            OR p.barcode LIKE ? OR p.sku LIKE ? OR p.brand LIKE ?
+            OR p.category LIKE ? OR p.color LIKE ?
+        )"""
+        params += [q] * 8
+    sql += " ORDER BY p.name"
     c.execute(sql, params)
-    rows = c.fetchall()
+    rows = [dict(row) for row in c.fetchall()]
     conn.close()
     return rows
+
+
+def get_product_admin_kpis(db_name):
+    """Return the eight headline product KPIs used by the admin list."""
+    with sqlite3.connect(db_name) as conn:
+        row = conn.execute("""
+            SELECT COUNT(*),
+                   SUM(CASE WHEN status='Active' THEN 1 ELSE 0 END),
+                   COALESCE(SUM(stock), 0),
+                   COALESCE(SUM(stock * purchase_price), 0),
+                   COALESCE(SUM(stock * selling_price), 0),
+                   SUM(CASE WHEN reorder_level>0 AND stock<=reorder_level
+                            THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN stock=0 THEN 1 ELSE 0 END)
+            FROM products
+            WHERE is_deleted=0
+        """).fetchone()
+        today_added = conn.execute("""
+            SELECT COALESCE(SUM(qty_in), 0)
+            FROM stock_update_logs
+            WHERE date(created_at)=date('now', 'localtime')
+        """).fetchone()[0]
+    return {
+        "total": int(row[0] or 0),
+        "active": int(row[1] or 0),
+        "stock_qty": int(row[2] or 0),
+        "stock_value": float(row[3] or 0),
+        "selling_value": float(row[4] or 0),
+        "low_stock": int(row[5] or 0),
+        "out_stock": int(row[6] or 0),
+        "today_added": int(today_added or 0),
+    }
 
 
 def get_categories(db_name):
@@ -949,23 +1019,17 @@ def get_product_suppliers(db_name, product_code):
     """Return list of dicts for all suppliers linked to this product."""
     try:
         with sqlite3.connect(db_name) as conn:
+            conn.row_factory = sqlite3.Row
             rows = conn.execute("""
-                SELECT ps.*, s.name, s.phone, s.email, s.address
+                SELECT ps.*, s.name, s.contact_person, s.phone, s.mobile_number,
+                       s.email, s.address, s.city, s.state, s.payment_terms,
+                       s.current_balance, s.status AS supplier_status
                 FROM product_suppliers ps
                 JOIN suppliers s ON s.code = ps.supplier_code
                 WHERE ps.product_code = ?
                 ORDER BY ps.is_primary DESC, s.name
             """, (product_code,)).fetchall()
-            if not rows: return []
-            cur = conn.execute("""
-                SELECT ps.*, s.name, s.phone, s.email, s.address
-                FROM product_suppliers ps
-                JOIN suppliers s ON s.code = ps.supplier_code
-                WHERE ps.product_code = ?
-                ORDER BY ps.is_primary DESC, s.name
-            """, (product_code,))
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(row) for row in rows]
     except Exception:
         return []
 
@@ -1039,6 +1103,88 @@ def get_price_history(db_name, product_code):
                 "FROM price_history WHERE product_code=? ORDER BY changed_at DESC LIMIT 10",
                 (product_code,)
             ).fetchall()
+    except Exception:
+        return []
+
+
+def get_product_sales_rows(db_name, product_code, product_name=""):
+    """Read local billing rows while tolerating common offline invoice schemas."""
+    try:
+        with sqlite3.connect(db_name) as conn:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "invoices" not in tables or "invoice_items" not in tables:
+                return []
+            inv_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(invoices)").fetchall()
+            }
+            item_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(invoice_items)").fetchall()
+            }
+
+            def pick(columns, choices):
+                return next((name for name in choices if name in columns), None)
+
+            join_col = pick(item_cols, ["invoice_id", "invoice_number", "invoice_no"])
+            inv_join = join_col if join_col in inv_cols else pick(
+                inv_cols, ["invoice_id", "invoice_number", "invoice_no"])
+            product_col = pick(
+                item_cols, ["product_code", "item_code", "code", "sku"])
+            name_col = pick(item_cols, ["product_name", "item_name", "name"])
+            qty_col = pick(item_cols, ["quantity", "qty", "stock_qty"])
+            price_col = pick(
+                item_cols, ["selling_price", "unit_price", "price", "rate"])
+            revenue_col = pick(
+                item_cols, ["total", "total_amount", "line_total", "amount"])
+            cost_col = pick(
+                item_cols, ["purchase_price", "cost_price", "cost"])
+            return_col = pick(
+                item_cols, ["return_status", "is_returned", "returned_qty"])
+            date_col = pick(
+                inv_cols, ["date", "sale_date", "invoice_date", "created_at"])
+            invoice_col = pick(
+                inv_cols, ["invoice_number", "invoice_no", "invoice_id", "id"])
+            if not all((join_col, inv_join, qty_col, date_col, invoice_col)):
+                return []
+            if not price_col and not revenue_col:
+                return []
+            where_col, where_value = (
+                (product_col, product_code) if product_col
+                else (name_col, product_name)
+            )
+            if not where_col:
+                return []
+            q = lambda name: f'"{name}"'
+            revenue_expr = (
+                f"ii.{q(revenue_col)}"
+                if revenue_col else
+                f"(ii.{q(qty_col)} * ii.{q(price_col)})"
+            )
+            price_expr = (
+                f"ii.{q(price_col)}" if price_col else
+                f"({revenue_expr} / NULLIF(ii.{q(qty_col)}, 0))"
+            )
+            cost_expr = f"ii.{q(cost_col)}" if cost_col else "NULL"
+            return_expr = f"ii.{q(return_col)}" if return_col else "''"
+            sql = f"""
+                SELECT i.{q(invoice_col)}, i.{q(date_col)}, ii.{q(qty_col)},
+                       {price_expr}, {revenue_expr}, {cost_expr}, {return_expr}
+                FROM invoice_items ii
+                JOIN invoices i ON ii.{q(join_col)} = i.{q(inv_join)}
+                WHERE lower(trim(CAST(ii.{q(where_col)} AS TEXT))) =
+                      lower(trim(CAST(? AS TEXT)))
+                ORDER BY i.{q(date_col)} DESC
+            """
+            rows = conn.execute(sql, (where_value,)).fetchall()
+        return [{
+            "invoice": row[0], "date": row[1], "qty": float(row[2] or 0),
+            "price": float(row[3] or 0), "revenue": float(row[4] or 0),
+            "cost": None if row[5] is None else float(row[5] or 0),
+            "return_status": row[6],
+        } for row in rows]
     except Exception:
         return []
 
@@ -1864,6 +2010,50 @@ def mini_table(cols, height=130):
     return t
 
 
+class _MonthlySalesChart(QWidget):
+    """Small dependency-free monthly quantity trend chart."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._values = []
+        self.setMinimumHeight(190)
+
+    def set_values(self, values):
+        self._values = list(values)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = self.rect().adjusted(42, 18, -18, -32)
+        painter.setPen(QColor(C["border"]))
+        painter.drawLine(area.bottomLeft(), area.bottomRight())
+        painter.drawLine(area.bottomLeft(), area.topLeft())
+        if not self._values:
+            painter.setPen(QColor(C["text3"]))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No sales data")
+            return
+        maximum = max(max(value for _label, value in self._values), 1)
+        count = len(self._values)
+        step = area.width() / max(count, 1)
+        points = []
+        for index, (label, value) in enumerate(self._values):
+            x = area.left() + step * index + step / 2
+            y = area.bottom() - (float(value) / maximum) * area.height()
+            points.append((x, y))
+            painter.setPen(QColor(C["text3"]))
+            painter.drawText(
+                QRect(int(x - step / 2), area.bottom() + 5, int(step), 20),
+                Qt.AlignmentFlag.AlignCenter, str(label))
+        painter.setPen(QPen(QColor(C["blue"]), 3))
+        for first, second in zip(points, points[1:]):
+            painter.drawLine(int(first[0]), int(first[1]), int(second[0]), int(second[1]))
+        painter.setBrush(QColor(C["accent"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for x, y in points:
+            painter.drawEllipse(QRect(int(x - 4), int(y - 4), 8, 8))
+
+
 # ─────────────────────────────────────────────────────────────
 #  GRADIENT BUTTON
 # ─────────────────────────────────────────────────────────────
@@ -2055,6 +2245,7 @@ class PurchaseStockDialog(QDialog):
         super().__init__(parent)
         self.db_name, self.product_code = db_name, product_code
         self.current_stock, self.current_user = int(current_stock or 0), current_user
+        self.product_record = get_product_full(db_name, product_code) or {}
         self.invoice_record = invoice_record or None
         self.original_qty = int((invoice_record or {}).get("quantity", 0) or 0)
         self.setWindowTitle(
@@ -2075,11 +2266,29 @@ class PurchaseStockDialog(QDialog):
         self.qty = QSpinBox(); self.qty.setRange(1, 9999999)
         self.price = price_spin()
         self.gst = QComboBox(); self.gst.addItems(["0%", "5%", "12%", "18%", "28%"])
+        self.actual_purchase = ro_label("₹ 0.00")
+        self.selling_price = price_spin()
+        self.selling_gst = QComboBox()
+        self.selling_gst.addItems(["0%", "5%", "12%", "18%", "28%"])
+        self.selling_tax_inclusive = ToggleSwitch("Selling price includes GST")
+        self.actual_selling = ro_label("₹ 0.00")
         self.discount = price_spin()
         self.paid = price_spin()
         self.notes = QTextEdit(); self.notes.setFixedHeight(65)
         self.total = ro_label("₹ 0.00"); self.balance = ro_label("₹ 0.00")
         self.status = ro_label("Pending"); self.new_stock = ro_label(str(self.current_stock))
+
+        self.selling_price.setValue(
+            float(self.product_record.get("selling_price", 0) or 0))
+        self.selling_gst.setCurrentText(
+            str(self.product_record.get("gst_rate", "0%") or "0%"))
+        self.selling_tax_inclusive.setChecked(
+            bool(self.product_record.get("tax_inclusive", 0)))
+        if not self.invoice_record:
+            self.price.setValue(
+                float(self.product_record.get("purchase_price", 0) or 0))
+            self.gst.setCurrentText(
+                str(self.product_record.get("purchase_gst", "0%") or "0%"))
 
         if self.invoice_record:
             self.supplier.setCurrentText(str(self.invoice_record.get("supplier_name", "") or ""))
@@ -2104,7 +2313,11 @@ class PurchaseStockDialog(QDialog):
             ("Current Available Stock", ro_label(str(current_stock))), ("Supplier Name", self.supplier),
             ("Invoice Number", self.invoice), ("Invoice Date", self.invoice_date),
             ("Purchase Date", self.purchase_date), ("Quantity Purchased", self.qty),
-            ("Purchase Price", self.price), ("GST Rate", self.gst),
+            ("Purchase Price", self.price), ("Purchase GST Rate", self.gst),
+            ("Actual Purchase Cost", self.actual_purchase),
+            ("Selling Price", self.selling_price),
+            ("Selling GST Rate", self.selling_gst),
+            ("Final Selling Price", self.actual_selling),
             ("Discount Amount", self.discount), ("Paid Amount", self.paid),
             ("Net Purchase Value", self.total), ("Balance Amount", self.balance),
             ("Payment Status", self.status), ("New Available Stock", self.new_stock),
@@ -2112,6 +2325,8 @@ class PurchaseStockDialog(QDialog):
         for i, (label, widget) in enumerate(info):
             add_field(form, i // 2, (i % 2) * 2, label, widget)
         row = (len(info) + 1) // 2
+        form.addWidget(self.selling_tax_inclusive, row, 0, 1, 4)
+        row += 1
         form.addWidget(QLabel("Notes", styleSheet=LABEL_SS), row, 0)
         form.addWidget(self.notes, row, 1, 1, 3)
 
@@ -2122,19 +2337,33 @@ class PurchaseStockDialog(QDialog):
             "success")
         cancel.clicked.connect(self.reject); save.clicked.connect(self._save)
         buttons.addWidget(cancel); buttons.addWidget(save); root.addLayout(buttons)
-        for w in (self.qty, self.price, self.discount, self.paid):
+        for w in (
+            self.qty, self.price, self.selling_price,
+            self.discount, self.paid
+        ):
             w.valueChanged.connect(self._calculate)
         self.gst.currentTextChanged.connect(self._calculate)
+        self.selling_gst.currentTextChanged.connect(self._calculate)
+        self.selling_tax_inclusive.stateChanged.connect(self._calculate)
         self._calculate()
 
     def _calculate(self):
         gross = self.qty.value() * self.price.value()
         rate = float(self.gst.currentText().replace("%", "") or 0)
+        purchase_unit_actual = self.price.value() * (1 + rate / 100)
+        selling_rate = float(
+            self.selling_gst.currentText().replace("%", "") or 0)
+        if self.selling_tax_inclusive.isChecked():
+            final_selling = self.selling_price.value()
+        else:
+            final_selling = self.selling_price.value() * (1 + selling_rate / 100)
         net = max(0.0, gross + gross * rate / 100 - self.discount.value())
         balance = max(0.0, net - self.paid.value())
         status = "Paid" if balance <= 0.005 else (
             "Partial" if self.paid.value() > 0 else "Pending")
         self.total.setText(f"₹ {net:,.2f}")
+        self.actual_purchase.setText(f"₹ {purchase_unit_actual:,.2f}")
+        self.actual_selling.setText(f"₹ {final_selling:,.2f}")
         self.balance.setText(f"₹ {balance:,.2f}")
         self.status.setText(status)
         stock_delta = self.qty.value() - self.original_qty
@@ -2142,8 +2371,13 @@ class PurchaseStockDialog(QDialog):
 
     def _save(self):
         supplier_name = self.supplier.currentText().strip()
-        if not supplier_name or not self.invoice.text().strip() or self.price.value() <= 0:
-            QMessageBox.warning(self, "Required", "Supplier, invoice number and purchase price are required.")
+        if (
+            not supplier_name or not self.invoice.text().strip()
+            or self.price.value() <= 0 or self.selling_price.value() <= 0
+        ):
+            QMessageBox.warning(
+                self, "Required",
+                "Supplier, invoice number, purchase price and selling price are required.")
             return
         supplier = get_supplier_by_name(self.db_name, supplier_name)
         supplier_code = supplier["code"] if supplier else create_supplier(self.db_name, supplier_name)
@@ -2162,13 +2396,14 @@ class PurchaseStockDialog(QDialog):
                     """UPDATE purchase_invoice_logs SET
                        supplier_code=?,supplier_name=?,invoice_number=?,
                        invoice_date=?,purchase_date=?,quantity=?,purchase_price=?,
-                       gst_rate=?,discount_amount=?,gross_amount=?,gst_amount=?,
+                       selling_price=?,gst_rate=?,discount_amount=?,gross_amount=?,gst_amount=?,
                        net_amount=?,paid_amount=?,balance_amount=?,payment_status=?,
                        stock_after=?,notes=? WHERE id=?""",
                     (supplier_code or "", supplier_name, self.invoice.text().strip(),
                      self.invoice_date.date().toString("yyyy-MM-dd"),
                      self.purchase_date.date().toString("yyyy-MM-dd"),
-                     self.qty.value(), self.price.value(), rate,
+                     self.qty.value(), self.price.value(),
+                     self.selling_price.value(), rate,
                      self.discount.value(), gross, gst_amount, net,
                      self.paid.value(), balance, status, new_stock,
                      self.notes.toPlainText().strip(), self.invoice_record["id"]))
@@ -2177,13 +2412,15 @@ class PurchaseStockDialog(QDialog):
                     """INSERT INTO purchase_invoice_logs(
                         product_code,supplier_code,supplier_name,invoice_number,
                         invoice_date,purchase_date,quantity,purchase_price,gst_rate,
+                        selling_price,
                         discount_amount,gross_amount,gst_amount,net_amount,paid_amount,
                         balance_amount,payment_status,stock_after,notes,created_at,created_by
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (self.product_code, supplier_code or "", supplier_name,
                      self.invoice.text().strip(), self.invoice_date.date().toString("yyyy-MM-dd"),
                      self.purchase_date.date().toString("yyyy-MM-dd"), self.qty.value(),
-                     self.price.value(), rate, self.discount.value(), gross, gst_amount,
+                     self.price.value(), rate, self.selling_price.value(),
+                     self.discount.value(), gross, gst_amount,
                      net, self.paid.value(), balance, status, new_stock,
                      self.notes.toPlainText().strip(), now, self.current_user))
             conn.execute(
@@ -2200,9 +2437,42 @@ class PurchaseStockDialog(QDialog):
                  self.current_user,
                  self.notes.toPlainText().strip(), now))
             conn.execute(
-                "UPDATE products SET stock=?, purchase_price=?, last_purchase_price=?, "
-                "last_stock_updated=?, updated_at=? WHERE item_code=?",
-                (new_stock, self.price.value(), self.price.value(), now, now, self.product_code))
+                """UPDATE products SET stock=?,purchase_price=?,
+                   last_purchase_price=?,purchase_gst=?,selling_price=?,
+                   gst_rate=?,igst_rate=?,tax_inclusive=?,
+                   last_stock_updated=?,updated_at=? WHERE item_code=?""",
+                (
+                    new_stock, self.price.value(), self.price.value(),
+                    self.gst.currentText(), self.selling_price.value(),
+                    self.selling_gst.currentText(),
+                    self.selling_gst.currentText(),
+                    int(self.selling_tax_inclusive.isChecked()),
+                    now, now, self.product_code,
+                ))
+            old_purchase = float(
+                self.product_record.get("purchase_price", 0) or 0)
+            old_selling = float(
+                self.product_record.get("selling_price", 0) or 0)
+            if (
+                abs(old_purchase - self.price.value()) > 0.005
+                or abs(old_selling - self.selling_price.value()) > 0.005
+            ):
+                conn.execute(
+                    """INSERT INTO price_history(
+                        product_code,purchase_price,selling_price,mrp,
+                        changed_at,changed_by,note
+                    ) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        self.product_code, self.price.value(),
+                        self.selling_price.value(),
+                        float(self.product_record.get("mrp", 0) or 0),
+                        now, self.current_user,
+                        (
+                            "Purchase invoice edited: "
+                            if self.invoice_record else
+                            "Purchase stock update: "
+                        ) + self.invoice.text().strip(),
+                    ))
             conn.execute(
                 "UPDATE product_suppliers SET unit_price=?, last_received_price=?, "
                 "last_ordered_date=? WHERE product_code=? AND supplier_code=?",
@@ -2278,6 +2548,50 @@ class ManualStockDialog(QDialog):
                 "WHERE item_code=?",
                 (new_stock, now, now, self.product_code))
         self.accept()
+
+
+class PurchaseInvoiceDetailDialog(QDialog):
+    """Read-only purchase invoice detail for one product."""
+    def __init__(self, record, product_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(
+            f"Purchase Invoice — {record.get('invoice_number', '')}")
+        self.setMinimumWidth(620)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 18)
+        title = QLabel("Purchase Invoice Details")
+        title.setStyleSheet(
+            f"font-size:17px;font-weight:700;color:{C['text']};"
+            "background:transparent;border:none;")
+        root.addWidget(title)
+
+        section, grid = make_section("Invoice Information", "🧾")
+        quantity = float(record.get("quantity", 0) or 0)
+        purchase_price = float(record.get("purchase_price", 0) or 0)
+        selling_price = float(record.get("selling_price", 0) or 0)
+        total_value = float(
+            record.get("net_amount")
+            or quantity * purchase_price
+            or 0)
+        values = [
+            ("Invoice Number", record.get("invoice_number", "")),
+            ("Supplier", record.get("supplier_name", "")),
+            ("Purchase Date", record.get("purchase_date", "")),
+            ("Product Name", product_name),
+            ("Quantity Purchased", f"{quantity:g}"),
+            ("Purchase Price", f"₹ {purchase_price:,.2f}"),
+            ("Selling Price", f"₹ {selling_price:,.2f}"),
+            ("Total Value", f"₹ {total_value:,.2f}"),
+        ]
+        for index, (label, value) in enumerate(values):
+            add_field(
+                grid, index // 2, (index % 2) * 2,
+                label, ro_label(str(value or "—")))
+        root.addWidget(section)
+        close = _GBtn("Close", "ghost")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout(); row.addStretch(); row.addWidget(close)
+        root.addLayout(row)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2424,6 +2738,7 @@ class ProductFormWidget(QWidget):
         self._build_tab_pricing()
         self._build_tab_inventory()
         self._build_tab_supplier()
+        self._build_tab_purchase_history()
         self._build_tab_history()
         self._build_tab_audit()
 
@@ -3498,8 +3813,10 @@ class ProductFormWidget(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.prod = get_product_full(self.db_name, product_code) or self.prod
             self._refresh_supplier_logs()
+            self._load_purchase_history()
             self._update_stock_calcs()
             self._refresh_supplier_summary()
+            self._load_history()
 
     def _open_manual_stock_dialog(self):
         product_code = self.edit_code or self.f_item_code.text().strip()
@@ -4743,8 +5060,10 @@ class ProductFormWidget(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.prod = get_product_full(self.db_name, self.edit_code) or self.prod
             self._refresh_supplier_logs()
+            self._load_purchase_history()
             self._refresh_supplier_summary()
             self._update_stock_calcs()
+            self._load_history()
 
     def _refresh_linked_suppliers(self):
         """Populate the Linked Suppliers section from DB."""
@@ -4875,7 +5194,76 @@ class ProductFormWidget(QWidget):
         self._refresh_linked_suppliers()
         self._refresh_supplier_summary()
 
-    # ── TAB 5: SALES HISTORY ──────────────────────────────
+    # ── TAB 5: PURCHASE HISTORY ───────────────────────────
+
+    def _build_tab_purchase_history(self):
+        page = QWidget(); page.setStyleSheet("background:transparent;")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(12)
+
+        section, grid = make_section("Product Purchase History", "🧾")
+        hint = QLabel("Click an invoice row to view its purchase details.")
+        hint.setStyleSheet(HINT_SS)
+        grid.addWidget(hint, 0, 0, 1, 4)
+        self.purchase_history_table = mini_table([
+            "Invoice Number", "Purchase Date", "Supplier Name",
+            "Quantity Purchased", "Purchase Price", "Total Value",
+            "Payment Status"
+        ], height=420)
+        self.purchase_history_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.purchase_history_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.purchase_history_table.cellClicked.connect(
+            self._open_purchase_history_invoice)
+        grid.addWidget(self.purchase_history_table, 1, 0, 1, 4)
+        lay.addWidget(section)
+        lay.addStretch()
+        self._purchase_history_rows = []
+        self.tabs.addTab(page, "🧾  Purchase History")
+
+    def _load_purchase_history(self):
+        self.purchase_history_table.setRowCount(0)
+        self._purchase_history_rows = []
+        if not self.edit_code:
+            return
+        rows = get_purchase_invoice_logs(self.db_name, self.edit_code)
+        current_product = get_product_full(self.db_name, self.edit_code) or {}
+        for record in rows:
+            if not float(record.get("selling_price", 0) or 0):
+                record["selling_price"] = float(
+                    current_product.get("selling_price", 0) or 0)
+            row = self.purchase_history_table.rowCount()
+            self.purchase_history_table.insertRow(row)
+            total_value = float(
+                record.get("net_amount")
+                or float(record.get("quantity", 0) or 0)
+                * float(record.get("purchase_price", 0) or 0))
+            values = [
+                record.get("invoice_number", ""),
+                record.get("purchase_date", ""),
+                record.get("supplier_name", ""),
+                record.get("quantity", 0),
+                f"₹ {float(record.get('purchase_price', 0) or 0):,.2f}",
+                f"₹ {total_value:,.2f}",
+                record.get("payment_status", "Pending"),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.purchase_history_table.setItem(row, col, item)
+            self._purchase_history_rows.append(record)
+
+    def _open_purchase_history_invoice(self, row, _column):
+        if row < 0 or row >= len(self._purchase_history_rows):
+            return
+        PurchaseInvoiceDetailDialog(
+            self._purchase_history_rows[row],
+            self.f_name.text().strip() or self.edit_code,
+            self,
+        ).exec()
+
+    # ── TAB 6: SALES HISTORY ──────────────────────────────
 
     def _build_tab_history(self):
         page = QWidget(); page.setStyleSheet("background:transparent;")
@@ -4893,69 +5281,210 @@ class ProductFormWidget(QWidget):
             cl.addWidget(t); cl.addWidget(v)
             setattr(self, attr, v)
             return card
-        kpi_row.addWidget(kpi("Total Units Sold", "lbl_total_sold"))
-        kpi_row.addWidget(kpi("Total Revenue",    "lbl_total_rev"))
-        kpi_row.addWidget(kpi("Return Count",     "lbl_returns"))
-        kpi_row.addWidget(kpi("Sales Count",      "lbl_inv_count"))
+        kpi_row.addWidget(kpi("Total Qty Sold", "lbl_total_sold"))
+        kpi_row.addWidget(kpi("Total Revenue", "lbl_total_rev"))
+        kpi_row.addWidget(kpi("Total Profit", "lbl_total_profit"))
+        kpi_row.addWidget(kpi("Last Sold Date", "lbl_last_sold"))
+        kpi_row.addWidget(kpi("Return Count", "lbl_returns"))
         lay.addLayout(kpi_row)
 
-        sec, g = make_section("Sales Stats", "📊")
-        self.lbl_last_sold = ro_label("—")
+        sec, g = make_section("Product Performance", "📊")
+        self.lbl_movement_status = ro_label("New Product")
+        self.lbl_sales_30 = ro_label("0")
+        self.lbl_sales_90 = ro_label("0")
         self.lbl_avg_sp    = ro_label("—")
-        add_field(g, 0, 0, "Last Sold Date",    self.lbl_last_sold)
-        add_field(g, 0, 2, "Avg Selling Price", self.lbl_avg_sp)
+        self.lbl_inv_count = ro_label("0")
+        add_field(g, 0, 0, "Movement Status", self.lbl_movement_status)
+        add_field(g, 0, 2, "Last 30 Days Sales", self.lbl_sales_30)
+        add_field(g, 1, 0, "Last 90 Days Sales", self.lbl_sales_90)
+        add_field(g, 1, 2, "Average Selling Price", self.lbl_avg_sp)
+        add_field(g, 2, 0, "Sale Count", self.lbl_inv_count)
         lay.addWidget(sec)
 
-        ph_frame = QFrame()
-        ph_frame.setStyleSheet(f"QFrame{{background:{C['bg_white']};border:1px solid {C['border']};border-radius:12px;}}")
-        ph_lay = QVBoxLayout(ph_frame); ph_lay.setContentsMargins(18, 14, 18, 14); ph_lay.setSpacing(8)
-        ph_hdr = QLabel("📈  Price History"); ph_hdr.setStyleSheet(SEC_HDR_SS)
-        ph_lay.addWidget(ph_hdr)
-        self.price_hist_table = mini_table(["Date", "Purchase", "Selling", "MRP", "Changed By"], height=160)
-        ph_lay.addWidget(self.price_hist_table)
-        lay.addWidget(ph_frame)
+        chart_sec, chart_grid = make_section("Monthly Sales Trend", "📈")
+        self.monthly_sales_chart = _MonthlySalesChart()
+        chart_grid.addWidget(self.monthly_sales_chart, 0, 0, 1, 4)
+        lay.addWidget(chart_sec)
 
-        hint = QLabel("💡  Sales history populates in Edit mode after product is saved and sold.")
-        hint.setStyleSheet(f"color:{C['text3']};font-size:12px;padding:8px;border:none;background:transparent;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(hint)
+        sales_sec, sales_grid = make_section("Recent Sales", "🧾")
+        self.recent_sales_table = mini_table([
+            "Invoice Number", "Sale Date", "Qty Sold", "Selling Price",
+            "Revenue", "Profit", "Return Status"
+        ], height=250)
+        sales_grid.addWidget(self.recent_sales_table, 0, 0, 1, 4)
+        lay.addWidget(sales_sec)
+
+        price_sec, price_grid = make_section("Price Change History", "💹")
+        self.price_hist_table = mini_table(
+            ["Date", "Purchase", "Selling", "MRP", "Changed By"], height=170)
+        price_grid.addWidget(self.price_hist_table, 0, 0, 1, 4)
+        lay.addWidget(price_sec)
         lay.addStretch()
         self.tabs.addTab(page, "📊  Sales History")
 
     def _load_history(self):
-        if not self.edit_code: return
+        if not self.edit_code:
+            return
         p = get_product_full(self.db_name, self.edit_code) or {}
-        self.lbl_total_sold.setText(str(p.get("total_qty_sold", 0)))
-        self.lbl_total_rev.setText(f"₹{float(p.get('total_revenue', 0)):,.0f}")
-        self.lbl_returns.setText(str(p.get("return_count", 0)))
-        self.lbl_inv_count.setText(str(p.get("sale_count", 0)))
-        self.lbl_last_sold.setText(p.get("last_sold_date", "—") or "—")
-        self.lbl_avg_sp.setText(f"₹{float(p.get('selling_price', 0)):,.2f}")
-        rows = get_price_history(self.db_name, self.edit_code)
-        self.price_hist_table.setRowCount(0)
-        for pur, sell, mrp, ch_at, ch_by, note in rows:
-            r = self.price_hist_table.rowCount(); self.price_hist_table.insertRow(r)
-            for col, val in enumerate([ch_at, f"₹{pur:.2f}", f"₹{sell:.2f}", f"₹{mrp:.2f}", ch_by]):
-                item = QTableWidgetItem(str(val or ""))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.price_hist_table.setItem(r, col, item)
+        rows = get_product_sales_rows(
+            self.db_name, self.edit_code, p.get("name", ""))
+        fallback_cost = float(
+            p.get("last_purchase_price") or p.get("purchase_price") or 0)
+        now = datetime.now()
 
-    # ── TAB 7: AUDIT ──────────────────────────────────────
+        def parsed_date(value):
+            text = str(value or "")[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(text, fmt)
+                except ValueError:
+                    continue
+            return None
+
+        total_qty = sum(row["qty"] for row in rows)
+        total_revenue = sum(row["revenue"] for row in rows)
+        total_profit = sum(
+            row["revenue"] - row["qty"] * (
+                row["cost"] if row["cost"] is not None else fallback_cost)
+            for row in rows)
+        dated_rows = [(row, parsed_date(row["date"])) for row in rows]
+        dated_rows = [(row, date) for row, date in dated_rows if date]
+        sales_30 = sum(
+            row["qty"] for row, date in dated_rows
+            if date >= now - timedelta(days=30))
+        sales_90 = sum(
+            row["qty"] for row, date in dated_rows
+            if date >= now - timedelta(days=90))
+        last_date = max((date for _row, date in dated_rows), default=None)
+        returned = sum(
+            1 for row in rows
+            if str(row["return_status"]).lower() not in ("", "0", "no", "false", "none"))
+
+        created = parsed_date(p.get("created_at"))
+        if not rows and created and created >= now - timedelta(days=90):
+            status, color = "New Product", C["blue"]
+        elif not last_date or last_date < now - timedelta(days=90):
+            status, color = "Dead Stock", C["accent"]
+        elif sales_30 >= 10:
+            status, color = "Fast Moving", C["success"]
+        else:
+            status, color = "Slow Moving", C["warning"]
+
+        self.lbl_total_sold.setText(f"{total_qty:g}")
+        self.lbl_total_rev.setText(f"₹ {total_revenue:,.2f}")
+        self.lbl_total_profit.setText(f"₹ {total_profit:,.2f}")
+        self.lbl_last_sold.setText(
+            last_date.strftime("%d-%m-%Y") if last_date else "—")
+        self.lbl_returns.setText(str(returned or int(p.get("return_count", 0) or 0)))
+        self.lbl_sales_30.setText(f"{sales_30:g}")
+        self.lbl_sales_90.setText(f"{sales_90:g}")
+        self.lbl_avg_sp.setText(
+            f"₹ {total_revenue / total_qty:,.2f}" if total_qty else "—")
+        self.lbl_inv_count.setText(str(len({str(row["invoice"]) for row in rows})))
+        self.lbl_movement_status.setText(status)
+        self.lbl_movement_status.setStyleSheet(
+            f"background:{C['bg_light']};border:1px solid {C['border']};"
+            f"border-radius:8px;padding:6px 10px;font-size:13px;"
+            f"font-weight:700;color:{color};min-height:34px;")
+
+        monthly = {}
+        for row, date in dated_rows:
+            key = date.strftime("%Y-%m")
+            monthly[key] = monthly.get(key, 0) + row["qty"]
+        month_keys = []
+        cursor = datetime(now.year, now.month, 1)
+        for offset in range(5, -1, -1):
+            year = cursor.year
+            month = cursor.month - offset
+            while month <= 0:
+                month += 12; year -= 1
+            month_keys.append(f"{year:04d}-{month:02d}")
+        self.monthly_sales_chart.set_values([
+            (datetime.strptime(key, "%Y-%m").strftime("%b"), monthly.get(key, 0))
+            for key in month_keys])
+
+        self.recent_sales_table.setRowCount(0)
+        for row in rows[:50]:
+            table_row = self.recent_sales_table.rowCount()
+            self.recent_sales_table.insertRow(table_row)
+            cost = row["cost"] if row["cost"] is not None else fallback_cost
+            profit = row["revenue"] - row["qty"] * cost
+            values = [
+                row["invoice"], row["date"], f"{row['qty']:g}",
+                f"₹ {row['price']:,.2f}", f"₹ {row['revenue']:,.2f}",
+                f"₹ {profit:,.2f}", row["return_status"] or "No",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.recent_sales_table.setItem(table_row, col, item)
+
+        self.price_hist_table.setRowCount(0)
+        for purchase, selling, mrp, changed_at, changed_by, _note in get_price_history(
+            self.db_name, self.edit_code
+        ):
+            table_row = self.price_hist_table.rowCount()
+            self.price_hist_table.insertRow(table_row)
+            values = [
+                changed_at, f"₹ {float(purchase or 0):,.2f}",
+                f"₹ {float(selling or 0):,.2f}", f"₹ {float(mrp or 0):,.2f}",
+                changed_by,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.price_hist_table.setItem(table_row, col, item)
+
+    # ── TAB 7: AUDIT & ACTIVITY ───────────────────────────
 
     def _build_tab_audit(self):
         page = QWidget(); page.setStyleSheet("background:transparent;")
         lay = QVBoxLayout(page); lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(12)
 
-        sec, g = make_section("Audit Trail", "🗃️")
+        sec, g = make_section("Creation Information", "🗓️")
         self.lbl_created_at = ro_label("—"); self.lbl_created_by = ro_label("—")
+        add_field(g, 0, 0, "Created Date", self.lbl_created_at)
+        add_field(g, 0, 2, "Created By", self.lbl_created_by)
+        lay.addWidget(sec)
+
+        sec, g = make_section("Update Information", "✏️")
         self.lbl_updated_at = ro_label("—"); self.lbl_updated_by = ro_label("—")
-        self.lbl_is_deleted = ro_label("No ✅"); self.lbl_deleted_at = ro_label("—")
-        add_field(g, 0, 0, "Created At",   self.lbl_created_at)
-        add_field(g, 0, 2, "Created By",   self.lbl_created_by)
-        add_field(g, 1, 0, "Last Updated", self.lbl_updated_at)
-        add_field(g, 1, 2, "Updated By",   self.lbl_updated_by)
-        add_field(g, 2, 0, "Soft Deleted", self.lbl_is_deleted)
-        add_field(g, 2, 2, "Deleted At",   self.lbl_deleted_at)
+        add_field(g, 0, 0, "Updated Date", self.lbl_updated_at)
+        add_field(g, 0, 2, "Updated By", self.lbl_updated_by)
+        lay.addWidget(sec)
+
+        sec, g = make_section("Activity Tracking", "📍")
+        self.lbl_last_price_change = ro_label("—")
+        self.lbl_last_stock_change = ro_label("—")
+        self.lbl_last_supplier_change = ro_label("—")
+        self.lbl_last_purchase_linked = ro_label("—")
+        self.lbl_last_invoice_linked = ro_label("—")
+        add_field(g, 0, 0, "Last Price Change", self.lbl_last_price_change)
+        add_field(g, 0, 2, "Last Stock Change", self.lbl_last_stock_change)
+        add_field(g, 1, 0, "Last Supplier Change", self.lbl_last_supplier_change)
+        add_field(g, 1, 2, "Last Purchase Linked", self.lbl_last_purchase_linked)
+        add_field(g, 2, 0, "Last Invoice Linked", self.lbl_last_invoice_linked)
+        lay.addWidget(sec)
+
+        sec, g = make_section("Notes", "📝")
+        self.lbl_audit_notes = ro_label("—")
+        self.lbl_internal_notes = ro_label("—")
+        self.lbl_audit_notes.setWordWrap(True)
+        self.lbl_internal_notes.setWordWrap(True)
+        add_field(g, 0, 0, "Notes", self.lbl_audit_notes, span=3)
+        add_field(g, 1, 0, "Internal Notes", self.lbl_internal_notes, span=3)
+        lay.addWidget(sec)
+
+        sec, g = make_section("Change Log", "🔄")
+        self.change_log_table = mini_table(
+            ["Date", "Change Type", "Reference", "Details", "Changed By"], 230)
+        g.addWidget(self.change_log_table, 0, 0, 1, 4)
+        lay.addWidget(sec)
+
+        sec, g = make_section("User Activity Log", "👤")
+        self.user_activity_table = mini_table(
+            ["Date", "User", "Activity", "Reference", "Notes"], 210)
+        g.addWidget(self.user_activity_table, 0, 0, 1, 4)
         lay.addWidget(sec)
 
         hint = QLabel("🔒  Read-only. All changes are recorded automatically.")
@@ -4963,17 +5492,170 @@ class ProductFormWidget(QWidget):
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(hint)
         lay.addStretch()
-        self.tabs.addTab(page, "🗃️  Audit")
+        self.tabs.addTab(page, "🗃️  Audit & Activity")
+
+    def _clear_audit(self):
+        labels = (
+            "lbl_created_at", "lbl_created_by", "lbl_updated_at", "lbl_updated_by",
+            "lbl_last_price_change", "lbl_last_stock_change",
+            "lbl_last_supplier_change", "lbl_last_purchase_linked",
+            "lbl_last_invoice_linked", "lbl_audit_notes", "lbl_internal_notes",
+        )
+        for name in labels:
+            label = getattr(self, name, None)
+            if label is not None:
+                label.setText("—")
+        for name in ("change_log_table", "user_activity_table"):
+            table = getattr(self, name, None)
+            if table is not None:
+                table.setRowCount(0)
 
     def _load_audit(self):
-        if not self.edit_code: return
+        self._clear_audit()
+        if not self.edit_code:
+            return
         p = self.prod
         self.lbl_created_at.setText(p.get("created_at", "—") or "—")
         self.lbl_created_by.setText(p.get("created_by", "—") or "—")
         self.lbl_updated_at.setText(p.get("updated_at", "—") or "—")
         self.lbl_updated_by.setText(p.get("updated_by", "—") or "—")
-        self.lbl_is_deleted.setText("Yes ⚠️" if p.get("is_deleted") else "No ✅")
-        self.lbl_deleted_at.setText(p.get("deleted_at", "—") or "—")
+        self.lbl_audit_notes.setText(
+            p.get("notes") or p.get("description") or "—")
+        self.lbl_internal_notes.setText(p.get("internal_notes") or "—")
+
+        activities = []
+        price_dates, stock_dates, supplier_dates, purchase_dates = [], [], [], []
+        latest_invoice = ("", "")
+
+        for purchase, selling, mrp, changed_at, changed_by, note in get_price_history(
+            self.db_name, self.edit_code
+        ):
+            date = str(changed_at or "")
+            price_dates.append(date)
+            details = (
+                f"Purchase ₹{float(purchase or 0):,.2f} · "
+                f"Selling ₹{float(selling or 0):,.2f} · "
+                f"MRP ₹{float(mrp or 0):,.2f}"
+            )
+            activities.append({
+                "date": date, "type": "Price Change", "reference": "",
+                "details": details, "user": changed_by or "system",
+                "notes": note or "",
+            })
+
+        for record in get_stock_update_logs(self.db_name, self.edit_code):
+            date = str(record.get("created_at") or "")
+            stock_dates.append(date)
+            details = (
+                f"Stock {int(record.get('old_stock') or 0)} → "
+                f"{int(record.get('new_stock') or 0)}"
+            )
+            movement = []
+            if int(record.get("qty_in") or 0):
+                movement.append(f"In {int(record.get('qty_in') or 0)}")
+            if int(record.get("qty_out") or 0):
+                movement.append(f"Out {int(record.get('qty_out') or 0)}")
+            if movement:
+                details += " · " + " / ".join(movement)
+            activities.append({
+                "date": date,
+                "type": record.get("action_type") or "Stock Change",
+                "reference": record.get("reference_number") or "",
+                "details": details,
+                "user": record.get("updated_by") or "system",
+                "notes": " · ".join(filter(None, [
+                    record.get("reason"), record.get("notes")])),
+            })
+
+        for adj_type, qty, reason, adj_date, created_by, note in get_stock_history(
+            self.db_name, self.edit_code
+        ):
+            date = str(adj_date or "")
+            stock_dates.append(date)
+            activities.append({
+                "date": date, "type": f"Stock {adj_type or 'Change'}",
+                "reference": "", "details": f"Quantity {int(qty or 0)}",
+                "user": created_by or "system",
+                "notes": " · ".join(filter(None, [reason, note])),
+            })
+
+        purchases = get_purchase_invoice_logs(self.db_name, self.edit_code)
+        for record in purchases:
+            date = str(
+                record.get("purchase_date") or record.get("invoice_date")
+                or record.get("created_at") or "")
+            purchase_dates.append(date)
+            invoice = str(record.get("invoice_number") or "")
+            if not latest_invoice or date > latest_invoice[0]:
+                latest_invoice = (date, invoice)
+            activities.append({
+                "date": date, "type": "Purchase Invoice Linked",
+                "reference": invoice,
+                "details": (
+                    f"{record.get('supplier_name') or 'Supplier'} · "
+                    f"Qty {int(record.get('quantity') or 0)} · "
+                    f"₹{float(record.get('net_amount') or 0):,.2f}"
+                ),
+                "user": record.get("created_by") or "system",
+                "notes": record.get("notes") or "",
+            })
+
+        try:
+            with sqlite3.connect(self.db_name) as conn:
+                conn.row_factory = sqlite3.Row
+                supplier_rows = conn.execute(
+                    """SELECT ps.supplier_code, ps.last_ordered_date,
+                              ps.supplier_product_code, s.name
+                       FROM product_suppliers ps
+                       LEFT JOIN suppliers s ON s.code=ps.supplier_code
+                       WHERE ps.product_code=?""",
+                    (self.edit_code,),
+                ).fetchall()
+            for row in supplier_rows:
+                date = str(row["last_ordered_date"] or "")
+                supplier_dates.append(date)
+                activities.append({
+                    "date": date, "type": "Supplier Linked",
+                    "reference": row["supplier_code"] or "",
+                    "details": " · ".join(filter(None, [
+                        row["name"], row["supplier_product_code"]])),
+                    "user": p.get("updated_by") or "system", "notes": "",
+                })
+        except sqlite3.Error:
+            pass
+
+        activities.sort(key=lambda item: item["date"], reverse=True)
+        self.lbl_last_price_change.setText(max(price_dates, default="") or "—")
+        self.lbl_last_stock_change.setText(
+            max(stock_dates, default="") or p.get("last_stock_updated") or "—")
+        self.lbl_last_supplier_change.setText(
+            max(supplier_dates, default="") or "—")
+        self.lbl_last_purchase_linked.setText(
+            max(purchase_dates, default="") or "—")
+        if latest_invoice[1]:
+            self.lbl_last_invoice_linked.setText(
+                f"{latest_invoice[1]} · {latest_invoice[0]}")
+
+        for activity in activities:
+            row = self.change_log_table.rowCount()
+            self.change_log_table.insertRow(row)
+            values = [
+                activity["date"], activity["type"], activity["reference"],
+                activity["details"], activity["user"],
+            ]
+            for col, value in enumerate(values):
+                self.change_log_table.setItem(
+                    row, col, QTableWidgetItem(str(value or "—")))
+
+            row = self.user_activity_table.rowCount()
+            self.user_activity_table.insertRow(row)
+            values = [
+                activity["date"], activity["user"], activity["type"],
+                activity["reference"], activity["notes"] or activity["details"],
+            ]
+            for col, value in enumerate(values):
+                self.user_activity_table.setItem(
+                    row, col, QTableWidgetItem(str(value or "—")))
 
     # ── Image ──────────────────────────────────────────────
 
@@ -4999,6 +5681,7 @@ class ProductFormWidget(QWidget):
         self.edit_code = None; self.prod = {}
         self._title_lbl.setText("Add Product"); self._btn_save.setText("💾  Save Product")
         self._reset_fields()
+        self._clear_audit()
         self._refresh_reusable_product_dropdowns()
         self._refresh_sub_categories()
         self.f_item_code.setText(get_next_item_code(self.db_name))
@@ -5011,6 +5694,7 @@ class ProductFormWidget(QWidget):
         self.adj_frame.setVisible(False)
         self._refresh_supplier_logs()
         self._refresh_supplier_summary()
+        self._load_purchase_history()
         self.tabs.setCurrentIndex(0)
 
     def _on_category_changed(self, category):
@@ -5134,6 +5818,7 @@ class ProductFormWidget(QWidget):
         self._toggle_custom_variants(self.f_has_custom_variants.isChecked())
         self.adj_frame.setVisible(False)
         self._load_history(); self._load_audit()
+        self._load_purchase_history()
         self._refresh_supplier_logs()
         self._refresh_linked_suppliers()
         self._refresh_supplier_summary()
@@ -5617,6 +6302,11 @@ class ProductListWidget(QWidget):
             }}
         """)
         fl = QVBoxLayout(ff); fl.setContentsMargins(14, 12, 14, 12); fl.setSpacing(8)
+        filter_title = QLabel("Advanced Filter")
+        filter_title.setStyleSheet(
+            f"color:{C['text']};font-size:13px;font-weight:800;"
+            "background:transparent;border:none;")
+        fl.addWidget(filter_title)
 
         # ── Row 1: Search ──────────────────────────────────
         search_wrap = QFrame()
@@ -5791,21 +6481,125 @@ class ProductListWidget(QWidget):
         fl.addLayout(filter_row)
         cl.addWidget(ff)
 
-        # Table — textile inventory columns
+        # ── KPI cards ──────────────────────────────────────
+        self._kpi_labels = {}
+        kpi_grid = QGridLayout()
+        kpi_grid.setContentsMargins(0, 0, 0, 0)
+        kpi_grid.setHorizontalSpacing(10)
+        kpi_grid.setVerticalSpacing(10)
+        kpi_specs = [
+            ("total", "Total Products", "📦", C["blue"]),
+            ("active", "Active Products", "✅", C["success"]),
+            ("stock_qty", "Total Stock Qty", "🧮", "#5856D6"),
+            ("stock_value", "Stock Value", "💰", "#AF52DE"),
+            ("selling_value", "Selling Value", "🏷️", "#007AFF"),
+            ("low_stock", "Low Stock Items", "⚠️", C["warning"]),
+            ("out_stock", "Out of Stock Items", "⛔", C["accent"]),
+            ("today_added", "Today Stock Added", "📥", "#00A67E"),
+        ]
+        for index, (key, title, icon, color) in enumerate(kpi_specs):
+            card = QFrame()
+            card.setMinimumHeight(82)
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background:{C['bg_white']}; border:1px solid {C['border']};
+                    border-radius:13px; border-left:4px solid {color};
+                }}
+                QLabel {{ border:none; background:transparent; }}
+            """)
+            card_lay = QVBoxLayout(card)
+            card_lay.setContentsMargins(13, 9, 13, 9)
+            card_lay.setSpacing(3)
+            title_lbl = QLabel(f"{icon}  {title}")
+            title_lbl.setStyleSheet(
+                f"color:{C['text3']};font-size:11px;font-weight:700;")
+            value_lbl = QLabel("—")
+            value_lbl.setStyleSheet(
+                f"color:{C['text']};font-size:20px;font-weight:800;")
+            card_lay.addWidget(title_lbl)
+            card_lay.addWidget(value_lbl)
+            self._kpi_labels[key] = value_lbl
+            kpi_grid.addWidget(card, index // 4, index % 4)
+        cl.addLayout(kpi_grid)
+
+        # ── Table heading and column settings ──────────────
+        table_head = QHBoxLayout()
+        table_title = QLabel("Daily Product Control")
+        table_title.setStyleSheet(
+            f"color:{C['text']};font-size:15px;font-weight:800;"
+            "background:transparent;")
+        table_head.addWidget(table_title)
+        table_head.addStretch()
+        self.column_btn = QToolButton()
+        self.column_btn.setText("⚙  Columns")
+        self.column_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.column_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.column_btn.setStyleSheet(f"""
+            QToolButton {{
+                background:{C['bg_white']}; color:{C['text2']};
+                border:1px solid {C['border']}; border-radius:8px;
+                padding:7px 13px; font-size:12px; font-weight:700;
+            }}
+            QToolButton:hover {{ border-color:{C['blue']}; color:{C['blue']}; }}
+        """)
+        self.column_menu = QMenu(self.column_btn)
+        self.column_menu.setStyleSheet(CALENDAR_MENU_SS)
+        self.column_btn.setMenu(self.column_menu)
+        table_head.addWidget(self.column_btn)
+        cl.addLayout(table_head)
+
+        self._columns = [
+            ("item_code", "Item Code", False),
+            ("name", "Product Name", False),
+            ("category", "Category", False),
+            ("brand", "Brand", False),
+            ("size", "Size", False),
+            ("color", "Color", False),
+            ("list_supplier", "Supplier", False),
+            ("purchase_price", "Purchase Price", False),
+            ("selling_price", "Selling Price", False),
+            ("margin", "Margin %", False),
+            ("stock", "Available Stock", False),
+            ("stock_status", "Stock Status", False),
+            ("list_last_purchase_date", "Last Purchase Date", False),
+            ("status", "Status", False),
+            ("actions", "Actions", False),
+            ("sku", "SKU", True),
+            ("barcode", "Barcode", True),
+            ("sub_category", "Sub Category", True),
+            ("fabric_type", "Fabric", True),
+            ("fit_type", "Fit", True),
+            ("mrp", "MRP", True),
+            ("stock", "Current Stock", True),
+            ("damaged_stock", "Damaged Stock", True),
+            ("returned_stock", "Returned Stock", True),
+            ("stock_value", "Stock Value", True),
+            ("reorder_level", "Reorder Level", True),
+            ("last_sold_date", "Last Sold Date", True),
+            ("list_last_invoice", "Last Invoice Number", True),
+        ]
+
+        # Table — minimal admin view plus optional hidden columns
         self.table = QTableWidget()
-        self.table.setColumnCount(11)
-        self.table.setHorizontalHeaderLabels([
-            "Item Code", "Product Name", "Category", "Unit",
-            "MRP ₹", "Sell ₹", "Margin", "Stock", "Reorder", "Status", "Actions"
-        ])
+        self.table.setColumnCount(len(self._columns))
+        self.table.setHorizontalHeaderLabels([col[1] for col in self._columns])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col, w in enumerate([90, 0, 100, 58, 90, 90, 70, 65, 70, 85, 110]):
-            if w: self.table.setColumnWidth(col, w)
+        widths = [92, 190, 105, 100, 75, 95, 135, 105, 105, 82, 95, 105, 118, 85, 150]
+        for col, width in enumerate(widths):
+            self.table.setColumnWidth(col, width)
+        for col, (_key, title, hidden) in enumerate(self._columns):
+            action = self.column_menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(not hidden)
+            action.toggled.connect(
+                lambda checked, index=col: self.table.setColumnHidden(index, not checked))
+            self.table.setColumnHidden(col, hidden)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet(f"""
             QTableWidget{{background:{C['bg_white']};border:1px solid {C['border']};
@@ -5818,9 +6612,164 @@ class ProductListWidget(QWidget):
             QTableWidget::item:selected{{background:{C['accent_tint2']};color:{C['text']};}}
         """)
         self.table.cellClicked.connect(self._on_cell_clicked)
-        self._row_codes: list  = []
+        self._row_codes: list = []
         self._row_stocks: list = []
-        cl.addWidget(self.table)
+        self._row_records: list = []
+
+        # ── Right-side product preview drawer ──────────────
+        self.preview_drawer = QFrame()
+        self.preview_drawer.setObjectName("productPreviewDrawer")
+        self.preview_drawer.setMinimumWidth(350)
+        self.preview_drawer.setMaximumWidth(390)
+        self.preview_drawer.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.preview_drawer.setVisible(False)
+        self.preview_drawer.setStyleSheet(f"""
+            QFrame#productPreviewDrawer {{
+                background:{C['bg_white']}; border:1px solid {C['border']};
+                border-radius:14px;
+            }}
+            QFrame#productPreviewDrawer QLabel {{
+                border:none; background:transparent;
+            }}
+            QScrollArea {{
+                border:none; background:transparent;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background:transparent;
+            }}
+            QScrollBar:vertical {{
+                background:transparent; width:7px; margin:2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background:{C['border']}; border-radius:3px; min-height:24px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height:0px;
+            }}
+        """)
+        drawer_lay = QVBoxLayout(self.preview_drawer)
+        drawer_lay.setContentsMargins(16, 14, 16, 14)
+        drawer_lay.setSpacing(8)
+
+        # Header stays visible while product details scroll.
+        drawer_top = QHBoxLayout()
+        drawer_title = QLabel("Product Preview")
+        drawer_title.setStyleSheet(
+            f"font-size:16px;font-weight:800;color:{C['text']};padding:0;")
+        drawer_close = QPushButton("✕")
+        drawer_close.setFixedSize(28, 28)
+        drawer_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        drawer_close.setStyleSheet(f"""
+            QPushButton {{
+                border:none;border-radius:14px;background:{C['bg_panel']};
+                color:{C['text2']};font-size:13px;font-weight:800;
+            }}
+            QPushButton:hover {{
+                background:{C['danger_tint']};color:{C['accent']};
+            }}
+        """)
+        drawer_close.clicked.connect(lambda: self.preview_drawer.hide())
+        drawer_top.addWidget(drawer_title)
+        drawer_top.addStretch()
+        drawer_top.addWidget(drawer_close)
+        drawer_lay.addLayout(drawer_top)
+
+        drawer_rule = QFrame()
+        drawer_rule.setFixedHeight(1)
+        drawer_rule.setStyleSheet(
+            f"background:{C['border']};border:none;")
+        drawer_lay.addWidget(drawer_rule)
+
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.preview_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        preview_content = QWidget()
+        preview_content.setStyleSheet("background:transparent;")
+        preview_content_lay = QVBoxLayout(preview_content)
+        preview_content_lay.setContentsMargins(1, 3, 5, 3)
+        preview_content_lay.setSpacing(8)
+
+        self.preview_image = QLabel("No Image")
+        self.preview_image.setMinimumHeight(105)
+        self.preview_image.setMaximumHeight(125)
+        self.preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_image.setStyleSheet(
+            f"background:{C['bg_panel']};border:1px dashed {C['border']};"
+            "border-radius:10px;color:#8e8e93;font-size:12px;")
+        preview_content_lay.addWidget(self.preview_image)
+
+        self.preview_name = QLabel("—")
+        self.preview_name.setWordWrap(True)
+        self.preview_name.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.preview_name.setStyleSheet(
+            f"font-size:17px;font-weight:800;color:{C['text']};padding-top:2px;")
+        self.preview_code = QLabel("—")
+        self.preview_code.setWordWrap(True)
+        self.preview_code.setStyleSheet(
+            f"font-size:11px;color:{C['text3']};padding-bottom:3px;")
+        preview_content_lay.addWidget(self.preview_name)
+        preview_content_lay.addWidget(self.preview_code)
+
+        detail_rule = QFrame()
+        detail_rule.setFixedHeight(1)
+        detail_rule.setStyleSheet(
+            f"background:{C['border']};border:none;")
+        preview_content_lay.addWidget(detail_rule)
+
+        self.preview_details = QLabel("—")
+        self.preview_details.setWordWrap(True)
+        self.preview_details.setTextFormat(Qt.TextFormat.RichText)
+        self.preview_details.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.preview_details.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.preview_details.setStyleSheet(
+            f"font-size:12px;color:{C['text2']};padding:2px 0 6px 0;")
+        preview_content_lay.addWidget(self.preview_details)
+        preview_content_lay.addStretch()
+        self.preview_scroll.setWidget(preview_content)
+        drawer_lay.addWidget(self.preview_scroll, 1)
+
+        # Footer actions remain visible and never overlap the content.
+        footer_rule = QFrame()
+        footer_rule.setFixedHeight(1)
+        footer_rule.setStyleSheet(
+            f"background:{C['border']};border:none;")
+        drawer_lay.addWidget(footer_rule)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 1, 0, 0)
+        action_row.setSpacing(8)
+        self.preview_edit_btn = QPushButton("✏️  Edit")
+        self.preview_stock_btn = QPushButton("📦  Update Stock")
+        for button in (self.preview_edit_btn, self.preview_stock_btn):
+            button.setMinimumHeight(39)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background:{C['blue']};color:white;border:none;
+                    border-radius:9px;font-size:12px;font-weight:700;
+                    padding:0 10px;
+                }}
+                QPushButton:hover {{ background:#1265C4; }}
+                QPushButton:pressed {{ background:#0E55A8; }}
+            """)
+            action_row.addWidget(button, 1)
+        drawer_lay.addLayout(action_row)
+        self.preview_edit_btn.clicked.connect(self._edit_preview_product)
+        self.preview_stock_btn.clicked.connect(self._stock_preview_product)
+        self._preview_code = ""
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
+        body.addWidget(self.table, 1)
+        body.addWidget(self.preview_drawer)
+        cl.addLayout(body, 1)
         root.addWidget(content)
 
         self._reload_cats()
@@ -5885,22 +6834,41 @@ class ProductListWidget(QWidget):
         if rows is None:
             rows = get_all_products(self.db_name, self._filters)
 
-        tbl     = self.table
+        self._load_kpis()
+        tbl = self.table
         tbl.setUpdatesEnabled(False)
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
-        self._row_codes  = []
+        self._row_codes = []
         self._row_stocks = []
+        self._row_records = []
 
-        low_count = 0
-        for rd in rows:
-            code, name, cat, unit, sell, mrp, stock, reorder, \
-                status, last_sold, purchase, brand = rd
+        for record in rows:
+            code = record.get("item_code", "")
+            name = record.get("name", "")
+            stock = int(record.get("stock") or 0)
+            reorder = int(record.get("reorder_level") or 0)
+            purchase = float(record.get("purchase_price") or 0)
+            selling = float(record.get("selling_price") or 0)
+            margin = ((selling - purchase) / selling * 100) if selling else 0
+            if stock <= 0:
+                stock_status = "Out of Stock"
+            elif reorder > 0 and stock <= reorder:
+                stock_status = "Low Stock"
+            else:
+                stock_status = "In Stock"
+            record = dict(record)
+            record.update({
+                "margin": margin,
+                "stock_status": stock_status,
+                "stock_value": stock * purchase,
+            })
 
             r = tbl.rowCount(); tbl.insertRow(r)
-            tbl.setRowHeight(r, 42)
+            tbl.setRowHeight(r, 44)
             self._row_codes.append(code)
-            self._row_stocks.append(int(stock or 0))
+            self._row_stocks.append(stock)
+            self._row_records.append(record)
 
             def _item(txt, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter):
                 it = QTableWidgetItem(str(txt))
@@ -5909,103 +6877,306 @@ class ProductListWidget(QWidget):
 
             C_CTR = Qt.AlignmentFlag.AlignCenter
             C_RGT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-
-            tbl.setItem(r, 0, _item(code or ""))
-            tbl.setItem(r, 1, _item(name or ""))
-            tbl.setItem(r, 2, _item(cat  or ""))
-            tbl.setItem(r, 3, _item(unit or "", C_CTR))
-
-            mrp_v = float(mrp or 0)
-            tbl.setItem(r, 4, _item(f"₹{mrp_v:,.2f}" if mrp_v else "—", C_RGT))
-
-            sp_v = float(sell or 0)
-            tbl.setItem(r, 5, _item(f"₹{sp_v:,.2f}", C_RGT))
-
-            pp_v = float(purchase or 0)
-            if pp_v > 0:
-                margin = (sp_v - pp_v) / pp_v * 100
-                mg = _item(f"{margin:.1f}%", C_CTR)
-                mg.setForeground(QBrush(QColor(C["success"] if margin >= 0 else C["accent"])))
-            else:
-                mg = _item("—", C_CTR)
-            tbl.setItem(r, 6, mg)
-
-            stk_v = int(stock or 0)
-            rod_v = int(reorder or 0)
-            si = _item(str(stk_v), C_CTR)
-            if stk_v == 0:
-                si.setForeground(QBrush(QColor(C["accent"])))
-                si.setBackground(QBrush(QColor(C["danger_tint"])))
-                low_count += 1
-            elif rod_v and stk_v <= rod_v:
-                si.setForeground(QBrush(QColor(C["warning"])))
-                si.setBackground(QBrush(QColor(C["warning_tint"])))
-                low_count += 1
-            tbl.setItem(r, 7, si)
-
-            tbl.setItem(r, 8, _item(str(rod_v) if rod_v else "—", C_CTR))
-
-            sc = {
-                "Active":       (C["success_tint"], C["success"]),
-                "Draft":        (C["warning_tint"], C["warning"]),
-                "Inactive":     (C["bg_panel"],     C["text3"]),
-                "Discontinued": (C["danger_tint"],  C["accent"]),
-            }.get(status, (C["bg_panel"], C["text3"]))
-            sti = _item(str(status or ""), C_CTR)
-            sti.setBackground(QBrush(QColor(sc[0])))
-            sti.setForeground(QBrush(QColor(sc[1])))
-            tbl.setItem(r, 9, sti)
-
-            act = _item("✏️  📦  🗑", C_CTR)
-            act.setToolTip("Edit, update stock, or delete")
-            act.setForeground(QBrush(QColor(C["text2"])))
-            tbl.setItem(r, 10, act)
+            for col, (key, _title, _hidden) in enumerate(self._columns):
+                if key == "actions":
+                    tbl.setCellWidget(r, col, self._make_action_widget(record))
+                    continue
+                value = record.get(key, "")
+                alignment = C_CTR if key in (
+                    "size", "color", "margin", "stock", "stock_status",
+                    "status", "damaged_stock", "returned_stock",
+                    "reorder_level") else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                if key in ("purchase_price", "selling_price", "mrp", "stock_value"):
+                    numeric = float(value or 0)
+                    text = f"₹{numeric:,.2f}" if numeric else "—"
+                    alignment = C_RGT
+                elif key == "margin":
+                    text = f"{float(value or 0):.1f}%" if selling else "—"
+                elif key in ("stock", "damaged_stock", "returned_stock", "reorder_level"):
+                    text = str(int(value or 0))
+                else:
+                    text = str(value or "—")
+                item = _item(text, alignment)
+                if key == "margin" and selling:
+                    item.setForeground(QBrush(QColor(
+                        C["success"] if margin >= 0 else C["accent"])))
+                elif key == "stock_status":
+                    palette = {
+                        "In Stock": (C["success_tint"], C["success"]),
+                        "Low Stock": (C["warning_tint"], C["warning"]),
+                        "Out of Stock": (C["danger_tint"], C["accent"]),
+                    }[stock_status]
+                    item.setBackground(QBrush(QColor(palette[0])))
+                    item.setForeground(QBrush(QColor(palette[1])))
+                elif key == "status":
+                    palette = {
+                        "Active": (C["success_tint"], C["success"]),
+                        "Draft": (C["warning_tint"], C["warning"]),
+                        "Inactive": (C["bg_panel"], C["text3"]),
+                        "Discontinued": (C["danger_tint"], C["accent"]),
+                    }.get(value, (C["bg_panel"], C["text3"]))
+                    item.setBackground(QBrush(QColor(palette[0])))
+                    item.setForeground(QBrush(QColor(palette[1])))
+                tbl.setItem(r, col, item)
 
         tbl.setUpdatesEnabled(True)
         total = tbl.rowCount()
         self._chip_total.setText(f"{total} Products")
-        self._chip_low.setText(f"{low_count} Low Stock")
+        self._chip_low.setText(
+            f"{sum(1 for row in self._row_records if row['stock_status'] != 'In Stock')} Low Stock")
+
+    def _load_kpis(self):
+        values = get_product_admin_kpis(self.db_name)
+        for key, label in self._kpi_labels.items():
+            value = values.get(key, 0)
+            if key in ("stock_value", "selling_value"):
+                label.setText(f"₹{float(value):,.2f}")
+            else:
+                label.setText(f"{int(value):,}")
+
+    def _make_action_widget(self, record):
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setSpacing(3)
+        code = record.get("item_code", "")
+
+        def icon_button(text, tooltip, callback):
+            button = QPushButton(text)
+            button.setToolTip(tooltip)
+            button.setFixedSize(29, 29)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background:{C['bg_panel']};border:1px solid {C['border']};
+                    border-radius:7px;font-size:13px;
+                }}
+                QPushButton:hover {{ background:{C['accent_tint2']};border-color:{C['accent']}; }}
+            """)
+            button.clicked.connect(callback)
+            lay.addWidget(button)
+
+        icon_button("👁", "View Product", lambda: self._show_preview(code))
+        icon_button("✏", "Edit Product", lambda: self._on_edit(code))
+        icon_button("📦", "Add / Update Stock", lambda: self._open_stock(code))
+
+        more = QToolButton()
+        more.setText("⋯")
+        more.setToolTip("More actions")
+        more.setFixedSize(29, 29)
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more.setCursor(Qt.CursorShape.PointingHandCursor)
+        more.setStyleSheet(f"""
+            QToolButton {{
+                background:{C['bg_panel']};border:1px solid {C['border']};
+                border-radius:7px;font-size:16px;font-weight:800;
+            }}
+            QToolButton:hover {{ background:{C['accent_tint2']};border-color:{C['accent']}; }}
+        """)
+        menu = QMenu(more)
+        menu.setStyleSheet(CALENDAR_MENU_SS)
+        menu.addAction("🧾  Invoice Log", lambda: self._show_invoice_log(code))
+        menu.addAction("📋  Stock Log", lambda: self._show_stock_log(code))
+        menu.addAction("🏭  Supplier Profile", lambda: self._show_supplier_profile(code))
+        menu.addSeparator()
+        menu.addAction("⛔  Delete / Inactive", lambda: self._confirm_delete(code))
+        more.setMenu(menu)
+        lay.addWidget(more)
+        return wrap
 
 
     # ── Cell click dispatcher ──────────────────────────────
 
     def _on_cell_clicked(self, row: int, col: int):
-        if col != 10 or row >= len(self._row_codes):
+        if row >= len(self._row_codes):
             return
-        code  = self._row_codes[row]
-        stock = self._row_stocks[row]
-        name_item = self.table.item(row, 1)
-        name = name_item.text() if name_item else code
+        if self._columns[col][0] != "actions":
+            self._show_preview(self._row_codes[row])
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle(f"Actions — {name}")
-        msg.setText(f"<b>{name}</b>  ({code})\nChoose an action:")
-        edit_btn = msg.addButton("✏️  Edit",        QMessageBox.ButtonRole.ActionRole)
-        stock_btn = msg.addButton("📦  Update Stock", QMessageBox.ButtonRole.ActionRole)
-        del_btn  = msg.addButton("🗑  Delete",       QMessageBox.ButtonRole.DestructiveRole)
-        msg.addButton("Cancel",                      QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == edit_btn:
-            self._on_edit(code)
-        elif clicked == stock_btn:
-            product = get_product_full(self.db_name, code) or {}
-            dlg = PurchaseStockDialog(
-                self.db_name, code, name, int(product.get("stock", stock) or 0),
-                self.current_user, self)
-            if dlg.exec() == QDialog.DialogCode.Accepted:
-                self._load_table()
-        elif clicked == del_btn:
-            self._confirm_delete(code)
+    def _record_for_code(self, code):
+        return next(
+            (record for record in self._row_records
+             if record.get("item_code") == code),
+            get_product_full(self.db_name, code) or {},
+        )
+
+    def _show_preview(self, code):
+        record = self._record_for_code(code)
+        if not record:
+            return
+        self._preview_code = code
+        self.preview_name.setText(record.get("name") or "Unnamed Product")
+        self.preview_code.setText(
+            f"{code}  ·  {record.get('sku') or 'No SKU'}")
+        stock = int(record.get("stock") or 0)
+        purchase = float(record.get("purchase_price") or 0)
+        selling = float(record.get("selling_price") or 0)
+        margin = ((selling - purchase) / selling * 100) if selling else 0
+        supplier = record.get("list_supplier") or record.get("supplier_name") or "—"
+        details = [
+            ("Category", record.get("category") or "—"),
+            ("Sub Category", record.get("sub_category") or "—"),
+            ("Brand", record.get("brand") or "—"),
+            ("Size", record.get("size") or "—"),
+            ("Color", record.get("color") or "—"),
+            ("Supplier", supplier),
+            ("Purchase Price", f"₹{purchase:,.2f}"),
+            ("Selling Price", f"₹{selling:,.2f}"),
+            ("Margin", f"{margin:.1f}%"),
+            ("Available Stock", f"{stock:,}"),
+            ("Last Purchase", record.get("list_last_purchase_date") or "—"),
+            ("Last Invoice", record.get("list_last_invoice") or "—"),
+        ]
+        rows = "".join(
+            "<tr>"
+            f"<td style='color:#86868b;padding:4px 12px 4px 0;'>{escape(label)}</td>"
+            f"<td style='color:#1d1d1f;padding:4px 0;'><b>{escape(str(value))}</b></td>"
+            "</tr>"
+            for label, value in details
+        )
+        self.preview_details.setText(
+            f"<table width='100%' cellspacing='0' cellpadding='0'>{rows}</table>")
+        image = record.get("image")
+        self.preview_image.clear()
+        if image:
+            pixmap = QPixmap()
+            pixmap.loadFromData(image)
+            if not pixmap.isNull():
+                self.preview_image.setPixmap(
+                    pixmap.scaled(
+                        315, 118, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation))
+            else:
+                self.preview_image.setText("No Image")
+        else:
+            self.preview_image.setText("No Image")
+        self.preview_drawer.show()
+        QTimer.singleShot(
+            0, lambda: self.preview_scroll.verticalScrollBar().setValue(0))
+
+    def _edit_preview_product(self):
+        if self._preview_code:
+            self._on_edit(self._preview_code)
+
+    def _stock_preview_product(self):
+        if self._preview_code:
+            self._open_stock(self._preview_code)
+
+    def _open_stock(self, code):
+        product = get_product_full(self.db_name, code) or {}
+        if not product:
+            return
+        dlg = PurchaseStockDialog(
+            self.db_name, code, product.get("name") or code,
+            int(product.get("stock") or 0), self.current_user, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._load_table()
+            self._show_preview(code)
+
+    def _log_dialog(self, title, columns, rows):
+        dialog = QDialog(self)
+        apply_app_icon(dialog)
+        dialog.setWindowTitle(title)
+        dialog.resize(1050, 480)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            f"font-size:18px;font-weight:800;color:{C['text']};padding:4px;")
+        layout.addWidget(heading)
+        table = mini_table(columns, 380)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        for values in rows:
+            row = table.rowCount()
+            table.insertRow(row)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value if value not in (None, "") else "—"))
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, col, item)
+        layout.addWidget(table)
+        close = QPushButton("Close")
+        close.setFixedHeight(38)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+        dialog.exec()
+
+    def _show_invoice_log(self, code):
+        records = get_purchase_invoice_logs(self.db_name, code)
+        rows = [[
+            record.get("invoice_number"), record.get("purchase_date"),
+            record.get("supplier_name"), record.get("quantity"),
+            f"₹{float(record.get('purchase_price') or 0):,.2f}",
+            f"₹{float(record.get('net_amount') or 0):,.2f}",
+            record.get("payment_status"), record.get("stock_after"),
+        ] for record in records]
+        self._log_dialog(
+            f"Invoice Log — {code}",
+            ["Invoice", "Purchase Date", "Supplier", "Qty", "Purchase Price",
+             "Net Amount", "Payment", "Stock After"],
+            rows,
+        )
+
+    def _show_stock_log(self, code):
+        records = get_stock_update_logs(self.db_name, code)
+        rows = [[
+            record.get("created_at"), record.get("action_type"),
+            record.get("reference_number"), record.get("qty_in"),
+            record.get("qty_out"), record.get("old_stock"),
+            record.get("new_stock"), record.get("updated_by"),
+            " · ".join(filter(None, [record.get("reason"), record.get("notes")])),
+        ] for record in records]
+        self._log_dialog(
+            f"Stock Log — {code}",
+            ["Date", "Action", "Reference", "Qty In", "Qty Out",
+             "Old Stock", "New Stock", "Updated By", "Notes"],
+            rows,
+        )
+
+    def _show_supplier_profile(self, code):
+        suppliers = get_product_suppliers(self.db_name, code)
+        if not suppliers:
+            QMessageBox.information(
+                self, "Supplier Profile",
+                "No supplier is linked to this product yet.")
+            return
+        rows = [[
+            supplier.get("code") or supplier.get("supplier_code"),
+            supplier.get("name"), supplier.get("contact_person"),
+            supplier.get("phone") or supplier.get("mobile_number"),
+            supplier.get("email"), supplier.get("city"),
+            supplier.get("payment_terms"),
+            f"₹{float(supplier.get('unit_price') or 0):,.2f}",
+            "Primary" if supplier.get("is_primary") else "Linked",
+        ] for supplier in suppliers]
+        self._log_dialog(
+            f"Supplier Profile — {code}",
+            ["Code", "Supplier", "Contact", "Phone", "Email", "City",
+             "Payment Terms", "Last Price", "Link"],
+            rows,
+        )
 
     def _confirm_delete(self, item_code):
-        reply = QMessageBox.question(
-            self, "Delete Product",
-            f"Soft-delete  '{item_code}'?\n"
-            "It will be hidden but kept in the database for historical records.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Delete / Inactive Product")
+        msg.setText(
+            f"Choose how to remove <b>{item_code}</b> from daily selling.")
+        inactive_btn = msg.addButton(
+            "Set Inactive", QMessageBox.ButtonRole.ActionRole)
+        delete_btn = msg.addButton(
+            "Soft Delete", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == inactive_btn:
+            with sqlite3.connect(self.db_name) as conn:
+                conn.execute(
+                    "UPDATE products SET status='Inactive',updated_at=?,updated_by=? "
+                    "WHERE item_code=?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                     self.current_user, item_code),
+                )
+            self._load_table()
+        elif msg.clickedButton() == delete_btn:
             soft_delete_product(self.db_name, item_code, self.current_user)
             self._load_table()
 

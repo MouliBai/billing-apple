@@ -48,7 +48,12 @@ C = dict(
     brand_border    = "rgba(250,45,72,0.22)",
 )
 
-FONT = "-apple-system, 'SF Pro Text', 'Segoe UI', Arial"
+SIDEBAR_FONT = "Segoe Print"
+SECTION_FONT_SIZE = 15
+ITEM_FONT_SIZE = 10
+PRIMARY_FONT_SIZE = 15
+META_FONT_SIZE = 9
+FONT = "'Segoe Print', 'Segoe UI', Arial"
 
 ICONS_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -70,7 +75,7 @@ NAV_ITEMS = [
     ]),
     ("Inventory", [
         ("product",      "Products",          "products"),
-        ("purchase_orders","Purchase Orders",  "purchase_orders"),
+        ("purchase_orders","Purchase Invoices", "purchase_orders"),
         ("suppliers",     "Suppliers",         "suppliers"),
         ("low_stock",     "Low Stock",         "low_stock"),
     ]),
@@ -182,15 +187,17 @@ def _pixmap(key: str, size: int = 18, color: str = "#1D1D1F") -> QPixmap:
 class _NavButton(QWidget):
     clicked = pyqtSignal()
 
-    def __init__(self, icon_key: str, label: str, active: bool = False):
+    def __init__(self, icon_key: str, label: str, active: bool = False,
+                 primary: bool = False):
         super().__init__()
         self._icon_key = icon_key
         self._label    = label
         self._active   = active
+        self._primary  = primary
         self._hovered  = False
         self._expanded = True
 
-        self.setFixedHeight(38)
+        self.setFixedHeight(42 if primary else 34)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
@@ -206,7 +213,11 @@ class _NavButton(QWidget):
         self._icon_lbl.setStyleSheet("background:transparent;border:none;")
 
         self._text_lbl = QLabel(label)
-        self._text_lbl.setFont(QFont("SF Pro Text", 16))
+        self._text_lbl.setFont(QFont(
+            SIDEBAR_FONT,
+            PRIMARY_FONT_SIZE if primary else ITEM_FONT_SIZE,
+            QFont.Weight.DemiBold if primary else QFont.Weight.Normal,
+        ))
         self._text_lbl.setStyleSheet(f"background:transparent;border:none;color:{C['text_primary']};")
         self._text_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
@@ -237,7 +248,7 @@ class _NavButton(QWidget):
                 self._layout.addStretch()
             self._layout.setContentsMargins(10, 0, 10, 0)
             self._layout.setSpacing(10)
-            self.setFixedHeight(38)
+            self.setFixedHeight(42 if self._primary else 34)
             self.setToolTip("")
         else:
             # Centering: remove trailing stretch, add leading stretch, zero margins
@@ -260,10 +271,11 @@ class _NavButton(QWidget):
         if not px.isNull():
             self._icon_lbl.setFixedSize(24, 24)
             self._icon_lbl.setPixmap(px)
-        weight = "600" if self._active else "400"
-        sz = "16pt" if self._expanded else "16pt"
+        weight = "700" if self._active else ("600" if self._primary else "400")
+        sz = PRIMARY_FONT_SIZE if self._primary else ITEM_FONT_SIZE
         self._text_lbl.setStyleSheet(
-            f"background:transparent;border:none;color:{col};font-weight:{weight};font-size:{sz};"
+            f"background:transparent;border:none;color:{col};"
+            f"font-family:'{SIDEBAR_FONT}';font-weight:{weight};font-size:{sz}pt;"
         )
         self.update()
 
@@ -328,7 +340,7 @@ class _FlyoutRow(QWidget):
         self._icon_lbl.setStyleSheet("background:transparent;border:none;")
 
         self._text_lbl = QLabel(label)
-        self._text_lbl.setFont(QFont("SF Pro Text", 15))
+        self._text_lbl.setFont(QFont(SIDEBAR_FONT, ITEM_FONT_SIZE))
 
         rl.addWidget(self._icon_lbl)
         rl.addWidget(self._text_lbl)
@@ -356,6 +368,7 @@ class _FlyoutRow(QWidget):
             self._icon_lbl.setPixmap(px)
         self._text_lbl.setStyleSheet(
             f"color:{col};background:transparent;border:none;font-weight:{fw};"
+            f"font-family:'{SIDEBAR_FONT}';font-size:{ITEM_FONT_SIZE}pt;"
         )
 
     def enterEvent(self, e):
@@ -422,7 +435,8 @@ class _FlyoutMenu(QWidget):
 
         if title:
             hdr = QLabel(title.upper())
-            hdr.setFont(QFont("SF Pro Text", 9, QFont.Weight.Bold))
+            hdr.setFont(QFont(
+                SIDEBAR_FONT, ITEM_FONT_SIZE, QFont.Weight.DemiBold))
             hdr.setStyleSheet(
                 f"color:{C['text_disabled']};background:transparent;border:none;"
                 f"padding:2px 6px 6px 6px;letter-spacing:1.1px;"
@@ -498,7 +512,7 @@ class _NavGroup(QWidget):
         # ── Section header (titled groups only) ───────────────
         if title:
             self._hdr = QWidget()
-            self._hdr.setFixedHeight(44)
+            self._hdr.setFixedHeight(48)
             self._hdr.setCursor(Qt.CursorShape.PointingHandCursor)
             self._hdr.setStyleSheet("background:transparent;border:none;")
             self._hdr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -513,14 +527,16 @@ class _NavGroup(QWidget):
             self._hdr_icon.setStyleSheet("background:transparent;border:none;")
 
             self._hdr_text = QLabel(title)
-            self._hdr_text.setFont(QFont("SF Pro Text", 16, QFont.Weight.Bold))
+            self._hdr_text.setFont(QFont(
+                SIDEBAR_FONT, SECTION_FONT_SIZE, QFont.Weight.DemiBold))
             self._hdr_text.setStyleSheet(
                 f"color:{C['text_primary']};background:transparent;border:none;"
+                f"font-family:'{SIDEBAR_FONT}';font-size:{SECTION_FONT_SIZE}pt;"
             )
             self._hdr_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
             self._chevron = QLabel("▾")
-            self._chevron.setFont(QFont("SF Pro Text", 12))
+            self._chevron.setFont(QFont(SIDEBAR_FONT, 9))
             self._chevron.setStyleSheet(f"color:{C['text_disabled']};background:transparent;border:none;")
 
             self._hdr_layout.addWidget(self._hdr_icon)
@@ -544,7 +560,9 @@ class _NavGroup(QWidget):
         items_lay.setSpacing(1)
 
         for icon_key, label, key in items:
-            btn = _NavButton(icon_key, label, active=(key == active_key))
+            btn = _NavButton(
+                icon_key, label, active=(key == active_key),
+                primary=not bool(title))
             btn.clicked.connect(lambda k=key: on_nav(k))
             items_lay.addWidget(btn)
             buttons_dict[key] = btn
@@ -660,7 +678,7 @@ class _NavGroup(QWidget):
         group_has_active = any(k == self._active_key for _, _, k in self._items)
         if self._sidebar_expanded:
             # Full header: icon + text + chevron
-            self._hdr.setFixedHeight(44)
+            self._hdr.setFixedHeight(48)
             group_has_active = any(k == self._active_key for _, _, k in self._items)
             icon_col = C["accent"] if group_has_active else C["text_primary"]
             px = _pixmap(icon_key, 24, icon_col)
@@ -820,8 +838,11 @@ class Sidebar(QFrame):
         lb_lay.addWidget(logo_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._brand_name = QLabel("Evo Aura")
-        self._brand_name.setFont(QFont("SF Pro Text", 16, QFont.Weight.Bold))
-        self._brand_name.setStyleSheet(f"color:{C['text_primary']};background:transparent;border:none;")
+        self._brand_name.setFont(QFont(
+            SIDEBAR_FONT, ITEM_FONT_SIZE, QFont.Weight.DemiBold))
+        self._brand_name.setStyleSheet(
+            f"color:{C['text_primary']};background:transparent;border:none;"
+            f"font-family:'{SIDEBAR_FONT}';font-size:{ITEM_FONT_SIZE}pt;")
 
         br_lay.addWidget(self._logo_badge)
         br_lay.addWidget(self._brand_name)
@@ -891,14 +912,17 @@ class Sidebar(QFrame):
         av_lay = QHBoxLayout(avatar)
         av_lay.setContentsMargins(0, 0, 0, 0)
         av_lbl = QLabel("EA")
-        av_lbl.setFont(QFont("SF Pro Text", 9, QFont.Weight.Bold))
+        av_lbl.setFont(QFont(
+            SIDEBAR_FONT, META_FONT_SIZE, QFont.Weight.DemiBold))
         av_lbl.setStyleSheet(f"color:{C['accent']};background:transparent;border:none;")
         av_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         av_lay.addWidget(av_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._ver_lbl = QLabel("Evo Aura  v1.0")
-        self._ver_lbl.setFont(QFont("SF Pro Text", 10))
-        self._ver_lbl.setStyleSheet(f"color:{C['text_disabled']};background:transparent;border:none;")
+        self._ver_lbl.setFont(QFont(SIDEBAR_FONT, META_FONT_SIZE))
+        self._ver_lbl.setStyleSheet(
+            f"color:{C['text_disabled']};background:transparent;border:none;"
+            f"font-family:'{SIDEBAR_FONT}';font-size:{META_FONT_SIZE}pt;")
 
         bot_lay.addWidget(avatar)
         bot_lay.addWidget(self._ver_lbl)

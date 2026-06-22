@@ -65,7 +65,7 @@ NAV_ITEMS = [
     ]),
     ("Inventory", [
         ("\U0001f4e6", "Products",         "products"),
-        ("\U0001f6d2", "Purchase Orders",  "purchase_orders"),
+        ("\U0001f6d2", "Purchase Invoices", "purchase_orders"),
         ("\U0001f69a", "Suppliers",        "suppliers"),
         ("\u26a0\ufe0f", "Low Stock",      "low_stock"),
     ]),

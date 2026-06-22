@@ -33,6 +33,9 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
+    QMenu,
+    QDateEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -184,17 +187,62 @@ def init_supplier_tables(db):
             selling_price REAL DEFAULT 0,
             total_value REAL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS supplier_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_code TEXT NOT NULL,
+            entry_date TEXT DEFAULT '',
+            entry_type TEXT DEFAULT '',
+            reference_number TEXT DEFAULT '',
+            invoice_number TEXT DEFAULT '',
+            debit REAL DEFAULT 0,
+            credit REAL DEFAULT 0,
+            balance REAL DEFAULT 0,
+            payment_mode TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS supplier_activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_code TEXT NOT NULL,
+            activity_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            action TEXT DEFAULT '',
+            reference TEXT DEFAULT '',
+            old_value TEXT DEFAULT '',
+            new_value TEXT DEFAULT '',
+            user TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
+        );
         """)
         supplier_columns = {
             "contact_person": "TEXT DEFAULT ''",
+            "mobile_number": "TEXT DEFAULT ''",
+            "whatsapp_number": "TEXT DEFAULT ''",
+            "pan_number": "TEXT DEFAULT ''",
             "city": "TEXT DEFAULT ''",
             "state": "TEXT DEFAULT ''",
             "pincode": "TEXT DEFAULT ''",
+            "country": "TEXT DEFAULT 'India'",
+            "address_line1": "TEXT DEFAULT ''",
+            "address_line2": "TEXT DEFAULT ''",
             "payment_terms_days": "INTEGER DEFAULT 30",
+            "payment_terms": "TEXT DEFAULT 'Net 30'",
             "credit_limit": "REAL DEFAULT 0",
             "current_balance": "REAL DEFAULT 0",
+            "account_holder_name": "TEXT DEFAULT ''",
+            "bank_name": "TEXT DEFAULT ''",
+            "branch_name": "TEXT DEFAULT ''",
+            "account_number": "TEXT DEFAULT ''",
+            "ifsc": "TEXT DEFAULT ''",
+            "upi_id": "TEXT DEFAULT ''",
+            "default_lead_time": "INTEGER DEFAULT 0",
+            "preferred_payment_method": "TEXT DEFAULT ''",
+            "supplier_category": "TEXT DEFAULT ''",
             "status": "TEXT DEFAULT 'Active'",
             "notes": "TEXT DEFAULT ''",
+            "created_by": "TEXT DEFAULT 'system'",
         }
         existing = {
             row[1] for row in conn.execute("PRAGMA table_info(suppliers)").fetchall()
@@ -217,13 +265,18 @@ def _supplier_product_rows(db, supplier):
             COALESCE(p.brand,'') AS brand,
             COALESCE(p.stock,0) AS stock,
             COALESCE(p.reserved_stock,0) AS reserved_stock,
+            COALESCE(p.damaged_stock,0) AS damaged_stock,
+            COALESCE(p.returned_stock,0) AS returned_stock,
             COALESCE(p.total_qty_sold,0) AS sold_qty,
             COALESCE(p.reorder_level,0) AS reorder_level,
             COALESCE(p.purchase_price,0) AS purchase_price,
             COALESCE(NULLIF(ps.unit_price,0), NULLIF(p.last_purchase_price,0),
                      p.purchase_price,0) AS last_purchase_price,
             COALESCE(p.selling_price,0) AS selling_price,
-            COALESCE(ps.last_ordered_date,'') AS linked_purchase_date
+            COALESCE(ps.last_ordered_date,'') AS linked_purchase_date,
+            COALESCE(ps.supplier_product_code,'') AS supplier_product_code,
+            COALESCE(ps.moq,1) AS moq,
+            COALESCE(p.status,'Active') AS status
         FROM products p
         LEFT JOIN product_suppliers ps
           ON ps.product_code=p.item_code AND ps.supplier_code=?
@@ -260,8 +313,13 @@ def _purchase_log_rows(db, product_codes):
         return []
     marks = ",".join("?" for _ in product_codes)
     return _rows(db, f"""
-        SELECT pl.*, p.name AS product_name, p.category, p.selling_price
-        FROM product_purchase_log pl
+        SELECT pl.*,
+               pl.quantity AS stock_qty,
+               pl.invoice_number AS invoice_no,
+               CAST(pl.gst_rate AS TEXT) AS purchase_gst,
+               p.name AS product_name, p.category,
+               COALESCE(NULLIF(pl.selling_price,0),p.selling_price,0) AS selling_price
+        FROM purchase_invoice_logs pl
         JOIN products p ON p.item_code=pl.product_code
         WHERE pl.product_code IN ({marks})
         ORDER BY pl.purchase_date DESC, pl.id DESC
@@ -322,6 +380,8 @@ def get_supplier_inventory(db, supplier_code):
             ),
             "average_purchase_price": average_price,
             "current_stock_value": available * average_price,
+            "damaged_stock": float(product.get("damaged_stock") or 0),
+            "returned_stock": float(product.get("returned_stock") or 0),
             "stock_status": stock_status,
         })
     return inventory
@@ -419,12 +479,13 @@ def get_invoice_items(db, supplier_code, invoice_number):
     marks = ",".join("?" for _ in codes)
     rows = _rows(db, f"""
         SELECT pl.product_code, p.name AS product_name, p.category,
-               pl.stock_qty AS quantity, pl.purchase_price,
-               p.selling_price,
-               pl.stock_qty * pl.purchase_price AS total_value
-        FROM product_purchase_log pl
+               pl.quantity, pl.purchase_price,
+               COALESCE(NULLIF(pl.selling_price,0),p.selling_price,0) AS selling_price,
+               COALESCE(NULLIF(pl.net_amount,0),
+                        pl.quantity * pl.purchase_price) AS total_value
+        FROM purchase_invoice_logs pl
         JOIN products p ON p.item_code=pl.product_code
-        WHERE pl.invoice_no=? AND pl.product_code IN ({marks})
+        WHERE pl.invoice_number=? AND pl.product_code IN ({marks})
         ORDER BY p.name
     """, (invoice_number, *codes))
     for row in rows:
@@ -497,32 +558,124 @@ def save_supplier(db, data, user="system"):
         code = f"SUP{int(next_no):05d}"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(db) as conn:
+        old = conn.execute(
+            "SELECT * FROM suppliers WHERE code=?", (code,)
+        ).fetchone()
         conn.execute("""
             INSERT INTO suppliers
-            (code,name,gstin,contact_person,phone,email,address,city,state,pincode,
-             payment_terms_days,credit_limit,current_balance,status,notes,
+            (code,name,gstin,pan_number,contact_person,phone,mobile_number,
+             whatsapp_number,email,address,address_line1,address_line2,city,state,
+             pincode,country,payment_terms,payment_terms_days,credit_limit,
+             current_balance,account_holder_name,bank_name,branch_name,
+             account_number,ifsc,upi_id,default_lead_time,
+             preferred_payment_method,supplier_category,status,notes,
              created_at,created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(code) DO UPDATE SET
-              name=excluded.name, gstin=excluded.gstin,
+              name=excluded.name, gstin=excluded.gstin, pan_number=excluded.pan_number,
               contact_person=excluded.contact_person, phone=excluded.phone,
-              email=excluded.email, address=excluded.address, city=excluded.city,
+              mobile_number=excluded.mobile_number,
+              whatsapp_number=excluded.whatsapp_number,
+              email=excluded.email, address=excluded.address,
+              address_line1=excluded.address_line1,
+              address_line2=excluded.address_line2, city=excluded.city,
               state=excluded.state, pincode=excluded.pincode,
+              country=excluded.country, payment_terms=excluded.payment_terms,
               payment_terms_days=excluded.payment_terms_days,
               credit_limit=excluded.credit_limit,
               current_balance=excluded.current_balance,
+              account_holder_name=excluded.account_holder_name,
+              bank_name=excluded.bank_name, branch_name=excluded.branch_name,
+              account_number=excluded.account_number, ifsc=excluded.ifsc,
+              upi_id=excluded.upi_id, default_lead_time=excluded.default_lead_time,
+              preferred_payment_method=excluded.preferred_payment_method,
+              supplier_category=excluded.supplier_category,
               status=excluded.status, notes=excluded.notes
         """, (
             code, data.get("name", ""), data.get("gstin", ""),
+            data.get("pan_number", ""),
             data.get("contact_person", ""), data.get("phone", ""),
+            data.get("mobile_number", ""), data.get("whatsapp_number", ""),
             data.get("email", ""), data.get("address", ""),
+            data.get("address_line1", ""), data.get("address_line2", ""),
             data.get("city", ""), data.get("state", ""), data.get("pincode", ""),
+            data.get("country", "India"), data.get("payment_terms", ""),
             int(data.get("payment_terms_days") or 0),
             float(data.get("credit_limit") or 0),
             float(data.get("current_balance") or 0),
+            data.get("account_holder_name", ""), data.get("bank_name", ""),
+            data.get("branch_name", ""), data.get("account_number", ""),
+            data.get("ifsc", ""), data.get("upi_id", ""),
+            int(data.get("default_lead_time") or 0),
+            data.get("preferred_payment_method", ""),
+            data.get("supplier_category", ""),
             data.get("status", "Active"), data.get("notes", ""), now, user,
         ))
+        conn.execute("""
+            INSERT INTO supplier_activity_log
+            (supplier_code,activity_at,action,reference,old_value,new_value,user,notes)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            code, now, "Supplier Edited" if old else "Supplier Created", code,
+            "Existing supplier" if old else "",
+            data.get("name", ""), user, data.get("notes", ""),
+        ))
     return code
+
+
+def get_supplier_ledger(db, supplier_code):
+    entries = _rows(db, """
+        SELECT entry_date, entry_type, reference_number, invoice_number,
+               debit, credit, balance, payment_mode, notes
+        FROM supplier_ledger WHERE supplier_code=?
+        ORDER BY entry_date DESC, id DESC
+    """, (supplier_code,))
+    if entries:
+        return entries
+    balance = 0.0
+    generated = []
+    for invoice in reversed(get_supplier_purchases(db, supplier_code)):
+        debit = float(invoice.get("net_amount") or 0)
+        credit = float(invoice.get("paid_amount") or 0)
+        balance += debit - credit
+        generated.append({
+            "entry_date": invoice.get("purchase_date"), "entry_type": "Purchase Invoice",
+            "reference_number": invoice.get("invoice_number"),
+            "invoice_number": invoice.get("invoice_number"), "debit": debit,
+            "credit": credit, "balance": balance, "payment_mode": "",
+            "notes": invoice.get("payment_status"),
+        })
+    return list(reversed(generated))
+
+
+def get_supplier_activity(db, supplier_code):
+    return _rows(db, """
+        SELECT activity_at, action, reference, old_value, new_value, user, notes
+        FROM supplier_activity_log WHERE supplier_code=?
+        ORDER BY activity_at DESC, id DESC
+    """, (supplier_code,))
+
+
+def get_supplier_list_kpis(db):
+    suppliers = get_suppliers(db, "")
+    today = datetime.date.today()
+    month_prefix = today.strftime("%Y-%m")
+    return {
+        "total": len(suppliers),
+        "active": sum(1 for row in suppliers if row.get("status") == "Active"),
+        "purchase_value": sum(float(row.get("total_purchase_value") or 0)
+                              for row in suppliers),
+        "pending": sum(float(row.get("pending_payment") or 0)
+                       for row in suppliers),
+        "stock_value": sum(float(row.get("current_stock_value") or 0)
+                           for row in suppliers),
+        "month_purchase": sum(
+            float(invoice.get("net_amount") or 0)
+            for row in suppliers
+            for invoice in get_supplier_purchases(db, row.get("code", ""))
+            if str(invoice.get("purchase_date") or "").startswith(month_prefix)
+        ),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -723,15 +876,23 @@ class SupplierFormWidget(QWidget):
         self.name = line("Supplier business name")
         self.contact = line("Contact person")
         self.phone = line("Phone number")
+        self.whatsapp = line("WhatsApp number")
         self.email = line("Email")
         self.gstin = line("GSTIN")
-        self.address = line("Street / area")
+        self.pan = line("PAN number")
+        self.category = line("Textile, garments, accessories…")
+        self.address = line("Address line 1")
+        self.address2 = line("Address line 2")
         self.city = line("City")
         self.state = line("State")
         self.pincode = line("PIN code")
+        self.country = line("Country"); self.country.setText("India")
         self.terms = QSpinBox(); self.terms.setRange(0, 365)
         self.terms.setSuffix(" days"); self.terms.setFixedHeight(38)
         self.terms.setStyleSheet(_NO_ARROW)
+        self.lead_time = QSpinBox(); self.lead_time.setRange(0, 365)
+        self.lead_time.setSuffix(" days"); self.lead_time.setFixedHeight(38)
+        self.lead_time.setStyleSheet(_NO_ARROW)
         self.credit = QDoubleSpinBox(); self.credit.setRange(0, 999999999)
         self.credit.setPrefix("₹ "); self.credit.setFixedHeight(38)
         self.credit.setStyleSheet(_NO_ARROW)
@@ -742,25 +903,61 @@ class SupplierFormWidget(QWidget):
             ["Active", "Inactive", "Blacklisted"]
         )
         self.status.setFixedHeight(38); _apply_combo_delegate(self.status)
+        self.payment_method = QComboBox()
+        self.payment_method.addItems([
+            "", "Bank Transfer", "UPI", "Cash", "Cheque", "Card", "Credit"])
+        self.payment_method.setFixedHeight(38)
+        _apply_combo_delegate(self.payment_method)
+        self.account_holder = line("Account holder name")
+        self.bank_name = line("Bank name")
+        self.branch = line("Branch name")
+        self.account_number = line("Account number")
+        self.ifsc = line("IFSC code")
+        self.upi = line("UPI ID")
         self.notes = QTextEdit(); self.notes.setFixedHeight(80)
         self.notes.setPlaceholderText("Supplier notes")
         self.notes.setStyleSheet(FIELD_SS)
 
-        fields = [
-            ("Supplier Code", self.code), ("Supplier Name *", self.name),
-            ("Contact Person", self.contact), ("Phone", self.phone),
-            ("Email", self.email), ("GSTIN", self.gstin),
-            ("Address", self.address), ("City", self.city),
-            ("State", self.state), ("PIN Code", self.pincode),
-            ("Payment Terms", self.terms), ("Credit Limit", self.credit),
-            ("Current Balance", self.balance), ("Status", self.status),
+        sections = [
+            ("Basic Information", [
+                ("Supplier Code", self.code), ("Supplier Name *", self.name),
+                ("Contact Person", self.contact), ("Phone", self.phone),
+                ("WhatsApp Number", self.whatsapp), ("Email", self.email),
+                ("GSTIN", self.gstin), ("PAN Number", self.pan),
+                ("Supplier Category", self.category), ("Status", self.status),
+            ]),
+            ("Address Information", [
+                ("Address Line 1", self.address), ("Address Line 2", self.address2),
+                ("City", self.city), ("State", self.state),
+                ("PIN Code", self.pincode), ("Country", self.country),
+            ]),
+            ("Banking Information", [
+                ("Account Holder", self.account_holder), ("Bank Name", self.bank_name),
+                ("Branch", self.branch), ("Account Number", self.account_number),
+                ("IFSC Code", self.ifsc), ("UPI ID", self.upi),
+            ]),
+            ("Purchase Configuration", [
+                ("Payment Terms", self.terms), ("Credit Limit", self.credit),
+                ("Current Balance", self.balance),
+                ("Default Lead Time", self.lead_time),
+                ("Preferred Payment", self.payment_method),
+            ]),
         ]
-        for index, (label, widget) in enumerate(fields):
-            row, side = divmod(index, 2)
-            label_widget = QLabel(label); label_widget.setStyleSheet(LABEL_SS)
-            grid.addWidget(label_widget, row, side * 2)
-            grid.addWidget(widget, row, side * 2 + 1)
-        notes_row = (len(fields) + 1) // 2
+        grid_row = 0
+        for section_name, fields in sections:
+            header = QLabel(section_name)
+            header.setStyleSheet(
+                f"font-size:14px;font-weight:800;color:{C['text']};"
+                f"padding:10px 2px 5px;border-bottom:1px solid {C['border']};")
+            grid.addWidget(header, grid_row, 0, 1, 4)
+            grid_row += 1
+            for index, (label, widget) in enumerate(fields):
+                row, side = grid_row + index // 2, index % 2
+                label_widget = QLabel(label); label_widget.setStyleSheet(LABEL_SS)
+                grid.addWidget(label_widget, row, side * 2)
+                grid.addWidget(widget, row, side * 2 + 1)
+            grid_row += (len(fields) + 1) // 2
+        notes_row = grid_row
         notes_label = QLabel("Notes"); notes_label.setStyleSheet(LABEL_SS)
         grid.addWidget(notes_label, notes_row, 0)
         grid.addWidget(self.notes, notes_row, 1, 1, 3)
@@ -772,12 +969,18 @@ class SupplierFormWidget(QWidget):
         self.title.setText("Add Supplier")
         for field in (
             self.code, self.name, self.contact, self.phone, self.email,
-            self.gstin, self.address, self.city, self.state, self.pincode,
+            self.whatsapp, self.gstin, self.pan, self.category,
+            self.address, self.address2, self.city, self.state, self.pincode,
+            self.account_holder, self.bank_name, self.branch,
+            self.account_number, self.ifsc, self.upi,
         ):
             field.clear()
+        self.country.setText("India")
         self.terms.setValue(30)
+        self.lead_time.setValue(0)
         self.credit.setValue(0); self.balance.setValue(0)
-        self.status.setCurrentIndex(0); self.notes.clear()
+        self.status.setCurrentIndex(0); self.payment_method.setCurrentIndex(0)
+        self.notes.clear()
         self.code.setReadOnly(False)
 
     def load_for_edit(self, code):
@@ -788,15 +991,31 @@ class SupplierFormWidget(QWidget):
         self.name.setText(supplier.get("name", ""))
         self.contact.setText(supplier.get("contact_person", ""))
         self.phone.setText(supplier.get("phone", ""))
+        self.whatsapp.setText(supplier.get("whatsapp_number", ""))
         self.email.setText(supplier.get("email", ""))
         self.gstin.setText(supplier.get("gstin", ""))
-        self.address.setText(supplier.get("address", ""))
+        self.pan.setText(supplier.get("pan_number", ""))
+        self.category.setText(supplier.get("supplier_category", ""))
+        self.address.setText(
+            supplier.get("address_line1") or supplier.get("address", ""))
+        self.address2.setText(supplier.get("address_line2", ""))
         self.city.setText(supplier.get("city", ""))
         self.state.setText(supplier.get("state", ""))
         self.pincode.setText(supplier.get("pincode", ""))
+        self.country.setText(supplier.get("country") or "India")
         self.terms.setValue(int(supplier.get("payment_terms_days") or 0))
+        self.lead_time.setValue(int(supplier.get("default_lead_time") or 0))
         self.credit.setValue(float(supplier.get("credit_limit") or 0))
         self.balance.setValue(float(supplier.get("current_balance") or 0))
+        self.account_holder.setText(supplier.get("account_holder_name", ""))
+        self.bank_name.setText(supplier.get("bank_name", ""))
+        self.branch.setText(supplier.get("branch_name", ""))
+        self.account_number.setText(supplier.get("account_number", ""))
+        self.ifsc.setText(supplier.get("ifsc", ""))
+        self.upi.setText(supplier.get("upi_id", ""))
+        payment_index = self.payment_method.findText(
+            supplier.get("preferred_payment_method") or "")
+        self.payment_method.setCurrentIndex(max(0, payment_index))
         index = self.status.findText(supplier.get("status") or "Active")
         self.status.setCurrentIndex(max(0, index))
         self.notes.setPlainText(supplier.get("notes", ""))
@@ -811,15 +1030,31 @@ class SupplierFormWidget(QWidget):
             "name": self.name.text().strip(),
             "contact_person": self.contact.text().strip(),
             "phone": self.phone.text().strip(),
+            "mobile_number": self.phone.text().strip(),
+            "whatsapp_number": self.whatsapp.text().strip(),
             "email": self.email.text().strip(),
             "gstin": self.gstin.text().strip(),
+            "pan_number": self.pan.text().strip(),
+            "supplier_category": self.category.text().strip(),
             "address": self.address.text().strip(),
+            "address_line1": self.address.text().strip(),
+            "address_line2": self.address2.text().strip(),
             "city": self.city.text().strip(),
             "state": self.state.text().strip(),
             "pincode": self.pincode.text().strip(),
+            "country": self.country.text().strip() or "India",
+            "payment_terms": f"Net {self.terms.value()}",
             "payment_terms_days": self.terms.value(),
             "credit_limit": self.credit.value(),
             "current_balance": self.balance.value(),
+            "account_holder_name": self.account_holder.text().strip(),
+            "bank_name": self.bank_name.text().strip(),
+            "branch_name": self.branch.text().strip(),
+            "account_number": self.account_number.text().strip(),
+            "ifsc": self.ifsc.text().strip().upper(),
+            "upi_id": self.upi.text().strip(),
+            "default_lead_time": self.lead_time.value(),
+            "preferred_payment_method": self.payment_method.currentText(),
             "status": self.status.currentText(),
             "notes": self.notes.toPlainText().strip(),
         }, self.current_user)
@@ -883,41 +1118,61 @@ class SupplierDetailWidget(QWidget):
                 border:1px solid {C['border']};}}
             QTabBar::tab:selected{{background:{C['accent']};color:white;font-weight:700;}}
         """)
+        self.products_table = _table([
+            "Product Code", "Product Name", "Category", "Brand", "Size", "Color",
+            "Supplier Product Code", "MOQ", "Last Purchase Price",
+            "Average Purchase Price", "Total Purchased Qty", "Available Stock",
+            "Last Purchase Date", "Status", "Actions",
+        ], stretch=False)
+        self.products_table.cellClicked.connect(self._open_product)
+        products_page = QWidget(); products_layout = QVBoxLayout(products_page)
+        products_layout.addWidget(self.products_table)
+        self.tabs.addTab(products_page, "PRODUCTS SUPPLIED")
+
         self.purchase_table = _table([
-            "Invoice Number", "Purchase Date", "Total Products", "Total Quantity",
-            "Purchase Value", "Discount Amount", "Tax Amount", "Net Amount",
-            "Paid Amount", "Balance Amount", "Payment Status",
+            "Invoice Number", "Invoice Date", "Purchase Date", "Total Products",
+            "Total Qty", "Purchase Value", "GST Amount", "Discount", "Net Amount",
+            "Paid Amount", "Balance Amount", "Payment Status", "Actions",
         ], stretch=False)
         self.purchase_table.cellClicked.connect(self._open_invoice)
         purchase_page = QWidget(); purchase_layout = QVBoxLayout(purchase_page)
-        purchase_hint = QLabel("Click an invoice number to view its products.")
-        purchase_hint.setStyleSheet(
-            f"font-size:11px;color:{C['text3']};border:none;"
-        )
-        purchase_layout.addWidget(purchase_hint)
+        invoice_actions = QHBoxLayout()
+        invoice_hint = QLabel("Click an invoice number to view product details.")
+        invoice_hint.setStyleSheet(f"font-size:11px;color:{C['text3']};border:none;")
+        invoice_actions.addWidget(invoice_hint); invoice_actions.addStretch()
+        self.add_payment_btn = _button("+ Add Payment")
+        self.add_payment_btn.clicked.connect(self._add_payment)
+        invoice_actions.addWidget(self.add_payment_btn)
+        purchase_layout.addLayout(invoice_actions)
         purchase_layout.addWidget(self.purchase_table)
-        self.tabs.addTab(purchase_page, "PURCHASE HISTORY")
+        self.tabs.addTab(purchase_page, "PURCHASE INVOICES")
 
         self.inventory_table = _table([
             "Product Code", "Product Name", "Category", "Brand", "Size", "Color",
             "Total Purchased Qty", "Total Sold Qty", "Available Stock",
-            "Reserved Stock", "Last Purchase Date", "Last Purchase Price",
-            "Average Purchase Price", "Current Selling Price", "Current Stock Value",
-            "Reorder Level", "Stock Status",
+            "Damaged Stock", "Returned Stock", "Last Invoice Number",
+            "Last Purchase Date", "Last Purchase Price", "Stock Value", "Stock Status",
         ], stretch=False)
         self.inventory_table.cellClicked.connect(self._open_product)
         inventory_page = QWidget(); inventory_layout = QVBoxLayout(inventory_page)
-        inventory_hint = QLabel("Click a product code or name for detailed inventory.")
-        inventory_hint.setStyleSheet(
-            f"font-size:11px;color:{C['text3']};border:none;"
-        )
-        inventory_layout.addWidget(inventory_hint)
         inventory_layout.addWidget(self.inventory_table)
-        self.tabs.addTab(inventory_page, "INVENTORY FROM THIS SUPPLIER")
+        self.tabs.addTab(inventory_page, "SUPPLIER INVENTORY")
 
-        self.insights_page = QWidget()
-        self.insights_layout = QVBoxLayout(self.insights_page)
-        self.tabs.addTab(self.insights_page, "BUSINESS INSIGHTS")
+        self.ledger_table = _table([
+            "Date", "Type", "Reference Number", "Invoice Number", "Debit",
+            "Credit", "Balance", "Payment Mode", "Notes",
+        ], stretch=False)
+        ledger_page = QWidget(); ledger_layout = QVBoxLayout(ledger_page)
+        ledger_layout.addWidget(self.ledger_table)
+        self.tabs.addTab(ledger_page, "PAYMENT / LEDGER")
+
+        self.activity_table = _table([
+            "Date & Time", "Action", "Reference", "Old Value", "New Value",
+            "User", "Notes",
+        ], stretch=False)
+        activity_page = QWidget(); activity_layout = QVBoxLayout(activity_page)
+        activity_layout.addWidget(self.activity_table)
+        self.tabs.addTab(activity_page, "ACTIVITY LOG")
         self.body_layout.addWidget(self.tabs)
         scroll.setWidget(body)
         root.addWidget(scroll)
@@ -994,7 +1249,213 @@ class SupplierDetailWidget(QWidget):
              "selling_price", "current_stock_value", "reorder_level", "stock_status"],
             currency_columns=(11, 12, 13, 14), status_column=16,
         )
-        self._load_insights(supplier, summary)
+        self._load_control_center()
+
+    def _load_control_center(self):
+        """Populate the five textile supplier-control tabs."""
+        supplier_code = self.supplier_code
+        supplier = _row(
+            self.db_name, "SELECT * FROM suppliers WHERE code=?", (supplier_code,))
+        while self.info_grid.count():
+            item = self.info_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        address = " ".join(filter(None, [
+            supplier.get("address_line1") or supplier.get("address"),
+            supplier.get("address_line2"),
+        ]))
+        account = "".join(
+            ch for ch in str(supplier.get("account_number") or "") if ch.isalnum())
+        info = [
+            ("Supplier Code", supplier_code), ("Supplier Name", supplier.get("name")),
+            ("Contact Person", supplier.get("contact_person")),
+            ("Phone", supplier.get("phone")), ("Email", supplier.get("email")),
+            ("GSTIN", supplier.get("gstin")), ("PAN", supplier.get("pan_number")),
+            ("Address", address), ("City", supplier.get("city")),
+            ("State", supplier.get("state")),
+            ("Payment Terms", f"{supplier.get('payment_terms_days') or 0} days"),
+            ("Credit Limit", _money(supplier.get("credit_limit"))),
+            ("Outstanding Balance", _money(supplier.get("current_balance"))),
+            ("Status", supplier.get("status") or "Active"),
+            ("Account Holder", supplier.get("account_holder_name")),
+            ("Bank", supplier.get("bank_name")),
+            ("Branch", supplier.get("branch_name")),
+            ("Account Number", f"XXXX XXXX {account[-4:]}" if account else "—"),
+            ("IFSC Code", supplier.get("ifsc")),
+            ("UPI ID", supplier.get("upi_id")),
+            ("Preferred Payment", supplier.get("preferred_payment_method")),
+        ]
+        for index, (label, value) in enumerate(info):
+            row, column = divmod(index, 3)
+            wrap = QWidget(); layout = QVBoxLayout(wrap)
+            layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(2)
+            name = QLabel(label)
+            name.setStyleSheet(
+                f"font-size:10px;font-weight:700;color:{C['text3']};border:none;")
+            data = QLabel(str(value or "—")); data.setWordWrap(True)
+            data.setStyleSheet(
+                f"font-size:12px;font-weight:600;color:{C['text']};border:none;")
+            layout.addWidget(name); layout.addWidget(data)
+            self.info_grid.addWidget(wrap, row, column)
+
+        summary = get_supplier_summary(self.db_name, supplier_code)
+        self.inventory_rows = get_supplier_inventory(self.db_name, supplier_code)
+        while self.stats_grid.count():
+            item = self.stats_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        average_price = (
+            sum(float(row.get("average_purchase_price") or 0)
+                for row in self.inventory_rows) / len(self.inventory_rows)
+            if self.inventory_rows else 0)
+        stats = [
+            ("Total Products Supplied", summary["total_products_purchased"]),
+            ("Total Purchase Qty", _number(summary["total_quantity_purchased"])),
+            ("Total Purchase Value", _money(summary["total_purchase_value"])),
+            ("Available Stock Qty", _number(summary["current_stock_qty"])),
+            ("Current Stock Value", _money(summary["current_stock_value"])),
+            ("Pending Payment", _money(summary["pending_payment"])),
+            ("Last Purchase Date", summary["last_purchase_date"] or "—"),
+            ("Average Purchase Price", _money(average_price)),
+        ]
+        for index, metric in enumerate(stats):
+            self.stats_grid.addWidget(
+                _stat_card(*metric, C["accent"] if index == 5 else None),
+                index // 4, index % 4)
+
+        for product in self.inventory_rows:
+            product["actions"] = "View · Stock · Logs"
+        _fill_table(
+            self.products_table, self.inventory_rows,
+            ["product_code", "product_name", "category", "brand", "size", "color",
+             "supplier_product_code", "moq", "last_purchase_price",
+             "average_purchase_price", "total_purchased_qty", "available_stock",
+             "last_purchase_date", "status", "actions"],
+            currency_columns=(8, 9), status_column=13)
+
+        self.purchase_rows = get_supplier_purchases(self.db_name, supplier_code)
+        for invoice in self.purchase_rows:
+            invoice["invoice_date"] = invoice.get("invoice_date") or invoice.get(
+                "purchase_date")
+            invoice["actions"] = "View · Payment"
+        _fill_table(
+            self.purchase_table, self.purchase_rows,
+            ["invoice_number", "invoice_date", "purchase_date", "total_products",
+             "total_quantity", "purchase_value", "tax_amount", "discount_amount",
+             "net_amount", "paid_amount", "balance_amount", "payment_status",
+             "actions"],
+            currency_columns=(5, 6, 7, 8, 9, 10), status_column=11)
+        _fill_table(
+            self.inventory_table, self.inventory_rows,
+            ["product_code", "product_name", "category", "brand", "size", "color",
+             "total_purchased_qty", "sold_qty", "available_stock", "damaged_stock",
+             "returned_stock", "last_invoice_number", "last_purchase_date",
+             "last_purchase_price", "current_stock_value", "stock_status"],
+            currency_columns=(13, 14), status_column=15)
+        _fill_table(
+            self.ledger_table, get_supplier_ledger(self.db_name, supplier_code),
+            ["entry_date", "entry_type", "reference_number", "invoice_number",
+             "debit", "credit", "balance", "payment_mode", "notes"],
+            currency_columns=(4, 5, 6))
+        _fill_table(
+            self.activity_table, get_supplier_activity(self.db_name, supplier_code),
+            ["activity_at", "action", "reference", "old_value", "new_value",
+             "user", "notes"])
+
+    def _add_payment(self):
+        if not self.purchase_rows:
+            QMessageBox.information(
+                self, "Add Payment", "No purchase invoice is available.")
+            return
+        selected = self.purchase_table.currentRow()
+        invoice = self.purchase_rows[
+            selected if 0 <= selected < len(self.purchase_rows) else 0]
+        dialog = QDialog(self)
+        apply_app_icon(dialog)
+        dialog.setWindowTitle("Add Supplier Payment")
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        form = QGridLayout()
+        invoice_box = QComboBox()
+        invoice_box.addItems([
+            row.get("invoice_number") or "Unnumbered" for row in self.purchase_rows])
+        invoice_box.setCurrentText(invoice.get("invoice_number") or "Unnumbered")
+        amount = QDoubleSpinBox(); amount.setRange(0, 999999999)
+        amount.setDecimals(2); amount.setPrefix("₹ ")
+        amount.setValue(float(invoice.get("balance_amount") or 0))
+        payment_mode = QComboBox()
+        payment_mode.addItems(
+            ["Bank Transfer", "UPI", "Cash", "Cheque", "Card"])
+        reference = QLineEdit(); reference.setPlaceholderText("Payment reference")
+        notes = QLineEdit(); notes.setPlaceholderText("Optional notes")
+        for row, (label, widget) in enumerate([
+            ("Invoice", invoice_box), ("Amount", amount),
+            ("Payment Mode", payment_mode), ("Reference", reference),
+            ("Notes", notes),
+        ]):
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(widget, row, 1)
+        layout.addLayout(form)
+        actions = QHBoxLayout(); actions.addStretch()
+        cancel = _button("Cancel"); save = _button("Save Payment", True)
+        cancel.clicked.connect(dialog.reject); save.clicked.connect(dialog.accept)
+        actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions)
+        if dialog.exec() != QDialog.DialogCode.Accepted or amount.value() <= 0:
+            return
+        selected_invoice = next(
+            (row for row in self.purchase_rows
+             if (row.get("invoice_number") or "Unnumbered")
+             == invoice_box.currentText()), invoice)
+        paid = min(
+            amount.value(), float(selected_invoice.get("balance_amount") or 0))
+        if paid <= 0:
+            return
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_paid = float(selected_invoice.get("paid_amount") or 0) + paid
+        new_balance = max(
+            0, float(selected_invoice.get("net_amount") or 0) - new_paid)
+        status = "Paid" if new_balance <= 0 else "Partially Paid"
+        with sqlite3.connect(self.db_name) as conn:
+            conn.execute("""
+                UPDATE purchase_invoice_logs
+                SET paid_amount=?, balance_amount=?, payment_status=?
+                WHERE supplier_code=? AND invoice_number=?
+            """, (new_paid, new_balance, status, self.supplier_code,
+                  invoice_box.currentText()))
+            previous = conn.execute(
+                "SELECT COALESCE(balance,0) FROM supplier_ledger "
+                "WHERE supplier_code=? ORDER BY id DESC LIMIT 1",
+                (self.supplier_code,)).fetchone()
+            ledger_balance = max(0, float(previous[0] if previous else 0) - paid)
+            conn.execute("""
+                INSERT INTO supplier_ledger
+                (supplier_code,entry_date,entry_type,reference_number,
+                 invoice_number,debit,credit,balance,payment_mode,notes,
+                 created_by,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                self.supplier_code, now[:10], "Payment Made",
+                reference.text().strip(), invoice_box.currentText(),
+                0, paid, ledger_balance, payment_mode.currentText(),
+                notes.text().strip(), "Admin", now))
+            conn.execute("""
+                INSERT INTO supplier_activity_log
+                (supplier_code,activity_at,action,reference,old_value,
+                 new_value,user,notes)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (
+                self.supplier_code, now, "Payment Added",
+                invoice_box.currentText(),
+                _money(selected_invoice.get("balance_amount")), _money(new_balance),
+                "Admin", notes.text().strip()))
+            conn.execute(
+                "UPDATE suppliers SET current_balance=? WHERE code=?",
+                (sum(
+                    max(0, float(row.get("balance_amount") or 0)
+                        - (paid if row is selected_invoice else 0))
+                    for row in self.purchase_rows), self.supplier_code))
+        self.load_supplier(self.supplier_code)
+        self.tabs.setCurrentIndex(3)
 
     def _open_invoice(self, row, column):
         if column == 0 and 0 <= row < len(self.purchase_rows):
@@ -1149,7 +1610,18 @@ class SupplierListWidget(QWidget):
         )
         self.search.setFixedHeight(38); self.search.setStyleSheet(FIELD_SS)
         self.search.textChanged.connect(self.refresh)
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(
+            ["All Status", "Active", "Inactive", "Blacklisted"])
+        self.status_filter.setFixedHeight(38)
+        _apply_combo_delegate(self.status_filter)
+        self.status_filter.currentTextChanged.connect(self.refresh)
         search_layout.addWidget(QLabel("🔎")); search_layout.addWidget(self.search)
+        advanced = QLabel("Advanced Filter")
+        advanced.setStyleSheet(
+            f"font-size:12px;font-weight:800;color:{C['text']};border:none;")
+        search_layout.insertWidget(0, advanced)
+        search_layout.addWidget(self.status_filter)
         root.addWidget(search_card)
 
         self.performance_wrap = QWidget()
@@ -1159,11 +1631,12 @@ class SupplierListWidget(QWidget):
         root.addWidget(self.performance_wrap)
 
         self.table = _table([
-            "Supplier Code", "Supplier Name", "Contact Person", "Phone", "City",
-            "Total Products Purchased", "Total Purchase Value",
-            "Current Available Stock Qty", "Current Stock Value",
-            "Last Purchase Date", "Pending Balance", "Status",
+            "Supplier Code", "Supplier Name", "Contact Person", "Phone", "GSTIN",
+            "City", "Total Products Supplied", "Total Purchase Value",
+            "Available Stock Qty", "Stock Value", "Last Purchase Date",
+            "Pending Balance", "Status", "Actions",
         ], stretch=False)
+        self.table.cellClicked.connect(self._cell_action)
         self.table.cellDoubleClicked.connect(self._view)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._edit_selected)
@@ -1222,6 +1695,41 @@ class SupplierListWidget(QWidget):
             f"{len(self.rows)} supplier{'s' if len(self.rows) != 1 else ''}"
         )
 
+    def refresh(self, *_args):
+        self.rows = get_suppliers(self.db_name, self.search.text())
+        selected_status = self.status_filter.currentText()
+        if selected_status != "All Status":
+            self.rows = [
+                row for row in self.rows if row.get("status") == selected_status]
+        while self.performance_grid.count():
+            item = self.performance_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        kpis = get_supplier_list_kpis(self.db_name)
+        performance = [
+            ("Total Suppliers", kpis["total"]),
+            ("Active Suppliers", kpis["active"]),
+            ("Total Purchase Value", _money(kpis["purchase_value"])),
+            ("Pending Payment", _money(kpis["pending"])),
+            ("Total Stock Value", _money(kpis["stock_value"])),
+            ("This Month Purchases", _money(kpis["month_purchase"])),
+        ]
+        for index, metric in enumerate(performance):
+            self.performance_grid.addWidget(
+                _stat_card(*metric, C["accent"] if index == 3 else None),
+                index // 3, index % 3)
+        for row in self.rows:
+            row["actions"] = "View · Edit · Products · Invoices · Ledger · Add Stock"
+        _fill_table(
+            self.table, self.rows,
+            ["code", "name", "contact_person", "phone", "gstin", "city",
+             "total_products_purchased", "total_purchase_value",
+             "current_stock_qty", "current_stock_value",
+             "last_purchase_date", "pending_payment", "status", "actions"],
+            currency_columns=(7, 9, 11), status_column=12)
+        self.count.setText(
+            f"{len(self.rows)} supplier{'s' if len(self.rows) != 1 else ''}")
+
     def _view(self, row, _column):
         if 0 <= row < len(self.rows):
             self.view_requested.emit(self.rows[row]["code"])
@@ -1230,6 +1738,10 @@ class SupplierListWidget(QWidget):
         row = self.table.currentRow()
         if 0 <= row < len(self.rows):
             self.edit_requested.emit(self.rows[row]["code"])
+
+    def _cell_action(self, row, column):
+        if column == 13 and 0 <= row < len(self.rows):
+            self.view_requested.emit(self.rows[row]["code"])
 
 
 class SupplierPage(QWidget):
