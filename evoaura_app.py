@@ -32,6 +32,7 @@ from PyQt6.QtGui  import QFont, QColor, QPalette, QPixmap, QImage
 from sidebar import Sidebar
 from product_page import ProductPage
 from input_behavior import ensure_global_input_guard
+from app_branding import apply_app_icon
 
 # ──────────────────────────────────────────────────────────────
 #  MASTER SECRET
@@ -1517,6 +1518,10 @@ class AppShell(QWidget):
 
         right_col = QWidget()
         right_col.setStyleSheet(f"background:{C['bg_white']};")
+        right_col.setMinimumWidth(0)
+        right_col.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         rc_lay = QVBoxLayout(right_col)
         rc_lay.setContentsMargins(0, 0, 0, 0)
         rc_lay.setSpacing(0)
@@ -1580,6 +1585,10 @@ class AppShell(QWidget):
 
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{C['bg_white']};")
+        self._stack.setMinimumWidth(0)
+        self._stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         rc_lay.addWidget(self._stack, 1)
 
         outer.addWidget(right_col, 1)
@@ -1904,6 +1913,7 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     ensure_global_input_guard()
+    apply_app_icon()
     app.setStyle("Fusion")
 
     pal = QPalette()

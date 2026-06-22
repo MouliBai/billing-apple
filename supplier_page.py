@@ -1,1125 +1,1289 @@
 """
-supplier_page.py  —  Evo Aura  •  Supplier Management
-======================================================
-Apple-theme, PyQt6, SQLite
-Mirrors product_page.py layout exactly:
-  SupplierPage
-    ├── SupplierListWidget  (list + search + top bar)
-    └── _SlidePanel         (overlay)
-          └── SupplierFormWidget   (Add/Edit tabs)
-          └── SupplierDetailWidget (Click → inventory view)
+EvoAura Supplier Management — Textile / Men's Wear
+===================================================
+Supplier master, purchase/invoice tracking, supplier inventory and insights.
+No batch, manufacture-date, expiry-date or FMCG/pharma fields are used.
 """
 
-import sqlite3, datetime
+import datetime
+import sqlite3
+from collections import defaultdict
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-    QScrollArea, QGridLayout, QTabWidget, QSizePolicy, QComboBox,
-    QAbstractItemView, QApplication, QSpinBox, QDoubleSpinBox,
-    QStackedWidget, QMessageBox, QDateEdit, QTextEdit,
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QStackedWidget,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore  import Qt, QTimer, QDate, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
-from PyQt6.QtGui   import QFont, QColor
+
+from app_branding import apply_app_icon
 from input_behavior import ensure_global_input_guard
 
-# ── mirror product_page color tokens ───────────────────────────────────────────
 try:
-    from product_page import C, _F, FIELD_SS, LABEL_SS, SEC_HDR_SS, _NO_ARROW, ToggleSwitch
-    from product_page import _apply_combo_delegate
-    from product_page import init_product_table
-except ImportError:
-    # Fallback standalone tokens
-    class _C(dict):
-        def __missing__(self, k): return "#888888"
-    C = _C(
-        bg_light="#F5F5F7", bg_white="#FFFFFF", bg_panel="#F2F2F7",
-        bg="#F5F5F7", border="#D2D2D7", text="#1D1D1F", text2="#6E6E73",
-        text3="#A1A1A6", accent="#FA2D48", accent_dark="#C81F36",
-        blue="#1A73E8", blue_tint="#EEF5FF", success="#27AE60",
-        warning="#E67E22", hover_bg="#E5E5EA", section_hdr="#1D1D1F",
+    from product_page import (
+        C,
+        FIELD_SS,
+        LABEL_SS,
+        SEC_HDR_SS,
+        _NO_ARROW,
+        _apply_combo_delegate,
+        init_product_table,
     )
-    def _F(size=13, bold=False):
-        f = QFont(); f.setPointSize(size)
-        if bold: f.setBold(True)
-        return f
-    FIELD_SS  = ""
-    LABEL_SS  = f"font-size:12px;color:#6E6E73;background:transparent;border:none;"
-    SEC_HDR_SS= f"font-size:14px;font-weight:700;color:#1D1D1F;background:transparent;border:none;"
+except ImportError:
+    C = {
+        "bg_light": "#F5F5F7", "bg_white": "#FFFFFF", "border": "#D2D2D7",
+        "text": "#1D1D1F", "text2": "#6E6E73", "text3": "#A1A1A6",
+        "accent": "#FA2D48", "accent_dark": "#C81F36", "blue": "#1A73E8",
+        "success": "#27AE60", "warning": "#E67E22", "danger": "#E53935",
+        "accent_tint2": "#FFF0F2",
+    }
+    FIELD_SS = ""
+    LABEL_SS = "font-size:12px;color:#6E6E73;background:transparent;border:none;"
+    SEC_HDR_SS = "font-size:14px;font-weight:700;color:#1D1D1F;border:none;"
     _NO_ARROW = ""
-    ToggleSwitch = None
-    def _apply_combo_delegate(cb): pass
-    def init_product_table(db, user): pass
+    def _apply_combo_delegate(_combo): pass
+    def init_product_table(_db, _user="system"): pass
+
+
+TABLE_SS = f"""
+QTableWidget {{
+    background:{C['bg_white']}; border:1px solid {C['border']};
+    border-radius:10px; gridline-color:#ECECF0; font-size:12px;
+    selection-background-color:#FFF0F2; selection-color:{C['text']};
+}}
+QHeaderView::section {{
+    background:#F5F5F7; color:{C['text2']}; font-size:11px;
+    font-weight:700; padding:9px 6px; border:none;
+    border-bottom:1px solid {C['border']};
+}}
+QTableWidget::item {{ padding:7px; }}
+"""
+
+BTN_PRIMARY = f"""
+QPushButton {{
+    background:{C['accent']}; color:white; border:none; border-radius:9px;
+    padding:8px 16px; font-size:12px; font-weight:700;
+}}
+QPushButton:hover {{ background:{C['accent_dark']}; }}
+"""
+
+BTN_SECONDARY = f"""
+QPushButton {{
+    background:white; color:{C['text']}; border:1px solid {C['border']};
+    border-radius:9px; padding:8px 14px; font-size:12px; font-weight:600;
+}}
+QPushButton:hover {{ border-color:{C['accent']}; background:#FFF8F9; }}
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DB HELPERS
+# Database and analytics
 # ─────────────────────────────────────────────────────────────────────────────
-def _q(db, sql, params=()):
+
+def _rows(db, sql, params=()):
     try:
         with sqlite3.connect(db) as conn:
-            cur = conn.execute(sql, params)
-            cols = [d[0] for d in cur.description] if cur.description else []
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
-    except Exception as e:
-        print("DB:", e); return []
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+    except Exception as exc:
+        print("supplier query:", exc)
+        return []
 
-def _qone(db, sql, params=()):
-    r = _q(db, sql, params); return r[0] if r else {}
 
-def _run(db, sql, params=()):
+def _row(db, sql, params=()):
+    rows = _rows(db, sql, params)
+    return rows[0] if rows else {}
+
+
+def _money(value):
+    return f"₹{float(value or 0):,.2f}"
+
+
+def _number(value):
+    value = float(value or 0)
+    return f"{value:,.0f}" if value.is_integer() else f"{value:,.2f}"
+
+
+def _gst_percent(text):
     try:
-        with sqlite3.connect(db) as conn:
-            conn.execute(sql, params); conn.commit(); return True
-    except Exception as e:
-        print("DB write:", e); return False
+        return float(str(text or "0").replace("%", "").strip())
+    except Exception:
+        return 0.0
+
 
 def init_supplier_tables(db):
-    """Ensure all supplier-related tables exist."""
     with sqlite3.connect(db) as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS suppliers (
-            code             TEXT PRIMARY KEY,
-            name             TEXT NOT NULL,
-            gstin            TEXT DEFAULT '',
-            contact_person   TEXT DEFAULT '',
-            phone            TEXT DEFAULT '',
-            email            TEXT DEFAULT '',
-            address          TEXT DEFAULT '',
-            city             TEXT DEFAULT '',
-            state            TEXT DEFAULT '',
-            pincode          TEXT DEFAULT '',
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            gstin TEXT DEFAULT '',
+            contact_person TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            address TEXT DEFAULT '',
+            city TEXT DEFAULT '',
+            state TEXT DEFAULT '',
+            pincode TEXT DEFAULT '',
             payment_terms_days INTEGER DEFAULT 30,
-            credit_limit     REAL DEFAULT 0,
-            current_balance  REAL DEFAULT 0,
-            status           TEXT DEFAULT 'Active',
-            notes            TEXT DEFAULT '',
-            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_by       TEXT DEFAULT 'system'
+            credit_limit REAL DEFAULT 0,
+            current_balance REAL DEFAULT 0,
+            status TEXT DEFAULT 'Active',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            created_by TEXT DEFAULT 'system'
         );
 
-        CREATE TABLE IF NOT EXISTS product_suppliers (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_code         TEXT NOT NULL,
-            supplier_code        TEXT NOT NULL,
-            supplier_product_code TEXT DEFAULT '',
-            unit_price           REAL DEFAULT 0,
-            moq                  INTEGER DEFAULT 1,
-            pack_size            INTEGER DEFAULT 1,
-            lead_time_days       INTEGER DEFAULT 0,
-            is_primary           INTEGER DEFAULT 0,
-            last_ordered_date    TEXT DEFAULT '',
-            UNIQUE(product_code, supplier_code),
-            FOREIGN KEY(supplier_code) REFERENCES suppliers(code)
+        CREATE TABLE IF NOT EXISTS supplier_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_code TEXT NOT NULL,
+            invoice_number TEXT NOT NULL,
+            purchase_date TEXT DEFAULT '',
+            discount_amount REAL DEFAULT 0,
+            tax_amount REAL DEFAULT 0,
+            net_amount REAL DEFAULT 0,
+            paid_amount REAL DEFAULT 0,
+            balance_amount REAL DEFAULT 0,
+            payment_status TEXT DEFAULT 'Pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(supplier_code, invoice_number)
         );
 
-        CREATE TABLE IF NOT EXISTS batches (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_code     TEXT NOT NULL,
-            supplier_code    TEXT DEFAULT '',
-            batch_no         TEXT NOT NULL,
-            qty              INTEGER DEFAULT 0,
-            sold_qty         INTEGER DEFAULT 0,
-            manufacture_date TEXT DEFAULT '',
-            expiry_date      TEXT DEFAULT '',
-            purchase_price   REAL DEFAULT 0,
-            mrp              REAL DEFAULT 0,
-            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_by       TEXT DEFAULT 'system'
+        CREATE TABLE IF NOT EXISTS supplier_invoice_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_code TEXT NOT NULL,
+            invoice_number TEXT NOT NULL,
+            product_code TEXT NOT NULL,
+            product_name TEXT DEFAULT '',
+            category TEXT DEFAULT '',
+            size TEXT DEFAULT '',
+            color TEXT DEFAULT '',
+            quantity REAL DEFAULT 0,
+            purchase_price REAL DEFAULT 0,
+            selling_price REAL DEFAULT 0,
+            total_value REAL DEFAULT 0
         );
         """)
-        # Migration: add missing columns
-        for col, defn in [
-            ("city","TEXT DEFAULT ''"), ("state","TEXT DEFAULT ''"),
-            ("pincode","TEXT DEFAULT ''"), ("contact_person","TEXT DEFAULT ''"),
-            ("credit_limit","REAL DEFAULT 0"), ("notes","TEXT DEFAULT ''"),
-            ("payment_terms_days","INTEGER DEFAULT 30"),
-            ("current_balance","REAL DEFAULT 0"),
-            ("status","TEXT DEFAULT 'Active'"),
-            ("created_by","TEXT DEFAULT 'system'"),
-        ]:
-            try: conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {defn}")
-            except: pass
-        for col, defn in [
-            ("sold_qty","INTEGER DEFAULT 0"), ("mrp","REAL DEFAULT 0"),
-            ("supplier_code","TEXT DEFAULT ''"),
-            ("batch_no","TEXT DEFAULT ''"),
-            ("manufacture_date","TEXT DEFAULT ''"),
-            ("created_at","TEXT DEFAULT ''"),
-        ]:
-            try: conn.execute(f"ALTER TABLE batches ADD COLUMN {col} {defn}")
-            except: pass
-        try:
-            conn.execute(
-                "UPDATE batches SET batch_no=batch_number "
-                "WHERE (batch_no IS NULL OR batch_no='') AND batch_number IS NOT NULL"
+        supplier_columns = {
+            "contact_person": "TEXT DEFAULT ''",
+            "city": "TEXT DEFAULT ''",
+            "state": "TEXT DEFAULT ''",
+            "pincode": "TEXT DEFAULT ''",
+            "payment_terms_days": "INTEGER DEFAULT 30",
+            "credit_limit": "REAL DEFAULT 0",
+            "current_balance": "REAL DEFAULT 0",
+            "status": "TEXT DEFAULT 'Active'",
+            "notes": "TEXT DEFAULT ''",
+        }
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(suppliers)").fetchall()
+        }
+        for column, definition in supplier_columns.items():
+            if column not in existing:
+                conn.execute(
+                    f"ALTER TABLE suppliers ADD COLUMN {column} {definition}"
+                )
+
+
+def _supplier_product_rows(db, supplier):
+    code = supplier.get("code", "")
+    name = supplier.get("name", "")
+    return _rows(db, """
+        SELECT DISTINCT
+            p.item_code AS product_code,
+            p.name AS product_name,
+            COALESCE(p.category,'') AS category,
+            COALESCE(p.brand,'') AS brand,
+            COALESCE(p.stock,0) AS stock,
+            COALESCE(p.reserved_stock,0) AS reserved_stock,
+            COALESCE(p.total_qty_sold,0) AS sold_qty,
+            COALESCE(p.reorder_level,0) AS reorder_level,
+            COALESCE(p.purchase_price,0) AS purchase_price,
+            COALESCE(NULLIF(ps.unit_price,0), NULLIF(p.last_purchase_price,0),
+                     p.purchase_price,0) AS last_purchase_price,
+            COALESCE(p.selling_price,0) AS selling_price,
+            COALESCE(ps.last_ordered_date,'') AS linked_purchase_date
+        FROM products p
+        LEFT JOIN product_suppliers ps
+          ON ps.product_code=p.item_code AND ps.supplier_code=?
+        WHERE COALESCE(p.is_deleted,0)=0
+          AND (
+              ps.supplier_code=?
+              OR LOWER(COALESCE(p.supplier_name,''))=LOWER(?)
+          )
+        ORDER BY p.name
+    """, (code, code, name))
+
+
+def _variant_labels(db, product_codes):
+    result = defaultdict(lambda: {"size": [], "color": []})
+    if not product_codes:
+        return result
+    marks = ",".join("?" for _ in product_codes)
+    rows = _rows(db, f"""
+        SELECT product_code, variant_group, size
+        FROM product_variants
+        WHERE product_code IN ({marks}) AND COALESCE(stock,0)>=0
+        ORDER BY product_code, size
+    """, tuple(product_codes))
+    for row in rows:
+        target = "color" if row["variant_group"] == "Color" else "size"
+        value = str(row.get("size") or "").strip()
+        if value and value not in result[row["product_code"]][target]:
+            result[row["product_code"]][target].append(value)
+    return result
+
+
+def _purchase_log_rows(db, product_codes):
+    if not product_codes:
+        return []
+    marks = ",".join("?" for _ in product_codes)
+    return _rows(db, f"""
+        SELECT pl.*, p.name AS product_name, p.category, p.selling_price
+        FROM product_purchase_log pl
+        JOIN products p ON p.item_code=pl.product_code
+        WHERE pl.product_code IN ({marks})
+        ORDER BY pl.purchase_date DESC, pl.id DESC
+    """, tuple(product_codes))
+
+
+def get_supplier_inventory(db, supplier_code):
+    supplier = _row(db, "SELECT * FROM suppliers WHERE code=?", (supplier_code,))
+    products = _supplier_product_rows(db, supplier)
+    codes = [row["product_code"] for row in products]
+    variants = _variant_labels(db, codes)
+    logs = _purchase_log_rows(db, codes)
+    by_product = defaultdict(list)
+    for log in logs:
+        by_product[log["product_code"]].append(log)
+
+    inventory = []
+    for product in products:
+        code = product["product_code"]
+        purchases = by_product.get(code, [])
+        total_purchased = sum(float(x.get("stock_qty") or 0) for x in purchases)
+        if not total_purchased:
+            total_purchased = float(product.get("stock") or 0) + float(
+                product.get("sold_qty") or 0
             )
-        except Exception:
-            pass
-        try:
-            conn.execute(
-                "UPDATE batches SET manufacture_date=mfg_date "
-                "WHERE (manufacture_date IS NULL OR manufacture_date='') AND mfg_date IS NOT NULL"
+        weighted_qty = sum(float(x.get("stock_qty") or 0) for x in purchases)
+        weighted_value = sum(
+            float(x.get("stock_qty") or 0) * float(x.get("purchase_price") or 0)
+            for x in purchases
+        )
+        average_price = (
+            weighted_value / weighted_qty if weighted_qty
+            else float(product.get("last_purchase_price") or 0)
+        )
+        last_log = purchases[0] if purchases else {}
+        stock = float(product.get("stock") or 0)
+        reserved = float(product.get("reserved_stock") or 0)
+        available = max(0, stock - reserved)
+        reorder = float(product.get("reorder_level") or 0)
+        if available <= 0:
+            stock_status = "Out of Stock"
+        elif reorder > 0 and available <= reorder:
+            stock_status = "Low Stock"
+        else:
+            stock_status = "In Stock"
+        inventory.append({
+            **product,
+            "size": ", ".join(variants[code]["size"]) or "—",
+            "color": ", ".join(variants[code]["color"]) or "—",
+            "total_purchased_qty": total_purchased,
+            "available_stock": available,
+            "last_purchase_date": last_log.get("purchase_date")
+                                  or product.get("linked_purchase_date") or "",
+            "last_invoice_number": last_log.get("invoice_no") or "",
+            "last_purchase_price": float(
+                last_log.get("purchase_price")
+                or product.get("last_purchase_price") or 0
+            ),
+            "average_purchase_price": average_price,
+            "current_stock_value": available * average_price,
+            "stock_status": stock_status,
+        })
+    return inventory
+
+
+def get_supplier_purchases(db, supplier_code):
+    supplier = _row(db, "SELECT * FROM suppliers WHERE code=?", (supplier_code,))
+    inventory = get_supplier_inventory(db, supplier_code)
+    codes = [row["product_code"] for row in inventory]
+    grouped = {}
+
+    for invoice in _rows(db, """
+        SELECT * FROM supplier_invoices
+        WHERE supplier_code=? ORDER BY purchase_date DESC, id DESC
+    """, (supplier_code,)):
+        item_summary = _row(db, """
+            SELECT COUNT(DISTINCT product_code) AS products,
+                   COALESCE(SUM(quantity),0) AS quantity,
+                   COALESCE(SUM(total_value),0) AS purchase_value
+            FROM supplier_invoice_items
+            WHERE supplier_code=? AND invoice_number=?
+        """, (supplier_code, invoice["invoice_number"]))
+        grouped[invoice["invoice_number"]] = {
+            "invoice_number": invoice["invoice_number"],
+            "purchase_date": invoice.get("purchase_date") or "",
+            "discount_amount": float(invoice.get("discount_amount") or 0),
+            "tax_amount": float(invoice.get("tax_amount") or 0),
+            "net_amount": float(invoice.get("net_amount") or 0),
+            "paid_amount": float(invoice.get("paid_amount") or 0),
+            "balance_amount": float(invoice.get("balance_amount") or 0),
+            "payment_status": invoice.get("payment_status") or "Pending",
+            "products": {
+                f"saved-{index}"
+                for index in range(int(item_summary.get("products") or 0))
+            },
+            "total_quantity": float(item_summary.get("quantity") or 0),
+            "purchase_value": float(item_summary.get("purchase_value") or 0),
+        }
+
+    for log in _purchase_log_rows(db, codes):
+        number = log.get("invoice_no") or "Unnumbered"
+        invoice = grouped.setdefault(number, {
+            "invoice_number": number,
+            "purchase_date": log.get("purchase_date") or "",
+            "discount_amount": 0.0, "tax_amount": 0.0,
+            "net_amount": 0.0, "paid_amount": 0.0,
+            "balance_amount": 0.0, "payment_status": "Pending",
+            "products": set(), "total_quantity": 0.0, "purchase_value": 0.0,
+        })
+        qty = float(log.get("stock_qty") or 0)
+        price = float(log.get("purchase_price") or 0)
+        base = qty * price
+        tax = base * _gst_percent(log.get("purchase_gst")) / 100
+        invoice["products"].add(log.get("product_code"))
+        invoice["total_quantity"] += qty
+        invoice["purchase_value"] += base
+        if not invoice["tax_amount"]:
+            invoice["tax_amount"] += tax
+        if not invoice["net_amount"]:
+            invoice["net_amount"] += base + tax
+
+    for invoice in grouped.values():
+        if not invoice["balance_amount"] and invoice["net_amount"]:
+            invoice["balance_amount"] = max(
+                0, invoice["net_amount"] - invoice["paid_amount"]
             )
-        except Exception:
-            pass
-        try:
-            conn.execute(
-                "UPDATE batches SET created_at=received_date "
-                "WHERE (created_at IS NULL OR created_at='') AND received_date IS NOT NULL"
-            )
-        except Exception:
-            pass
+        if invoice["balance_amount"] <= 0 and invoice["net_amount"] > 0:
+            invoice["payment_status"] = "Paid"
+        elif invoice["paid_amount"] > 0:
+            invoice["payment_status"] = "Partially Paid"
+        invoice["total_products"] = len(invoice["products"])
+    return sorted(
+        grouped.values(),
+        key=lambda row: (row.get("purchase_date") or "", row["invoice_number"]),
+        reverse=True,
+    )
+
+
+def get_invoice_items(db, supplier_code, invoice_number):
+    saved = _rows(db, """
+        SELECT product_code, product_name, category, size, color, quantity,
+               purchase_price, selling_price, total_value
+        FROM supplier_invoice_items
+        WHERE supplier_code=? AND invoice_number=? ORDER BY product_name
+    """, (supplier_code, invoice_number))
+    if saved:
+        return saved
+
+    supplier = _row(db, "SELECT * FROM suppliers WHERE code=?", (supplier_code,))
+    products = _supplier_product_rows(db, supplier)
+    codes = [row["product_code"] for row in products]
+    if not codes:
+        return []
+    variants = _variant_labels(db, codes)
+    marks = ",".join("?" for _ in codes)
+    rows = _rows(db, f"""
+        SELECT pl.product_code, p.name AS product_name, p.category,
+               pl.stock_qty AS quantity, pl.purchase_price,
+               p.selling_price,
+               pl.stock_qty * pl.purchase_price AS total_value
+        FROM product_purchase_log pl
+        JOIN products p ON p.item_code=pl.product_code
+        WHERE pl.invoice_no=? AND pl.product_code IN ({marks})
+        ORDER BY p.name
+    """, (invoice_number, *codes))
+    for row in rows:
+        code = row["product_code"]
+        row["size"] = ", ".join(variants[code]["size"]) or "—"
+        row["color"] = ", ".join(variants[code]["color"]) or "—"
+    return rows
+
+
+def get_supplier_summary(db, supplier_code):
+    inventory = get_supplier_inventory(db, supplier_code)
+    purchases = get_supplier_purchases(db, supplier_code)
+    total_value = sum(float(row.get("net_amount") or 0) for row in purchases)
+    total_qty = sum(float(row.get("total_quantity") or 0) for row in purchases)
+    pending = sum(float(row.get("balance_amount") or 0) for row in purchases)
+    if not pending:
+        supplier = _row(db, "SELECT current_balance FROM suppliers WHERE code=?",
+                        (supplier_code,))
+        pending = float(supplier.get("current_balance") or 0)
+    return {
+        "total_purchase_orders": len(purchases),
+        "total_purchase_value": total_value,
+        "total_quantity_purchased": total_qty,
+        "total_products_purchased": len(inventory),
+        "average_purchase_value": total_value / len(purchases) if purchases else 0,
+        "last_purchase_date": purchases[0].get("purchase_date") if purchases else "",
+        "pending_payment": pending,
+        "current_stock_qty": sum(x["available_stock"] for x in inventory),
+        "current_stock_value": sum(x["current_stock_value"] for x in inventory),
+    }
+
 
 def get_suppliers(db, search=""):
-    like = f"%{search}%"
-    return _q(db, """
-        SELECT s.*,
-               COUNT(DISTINCT COALESCE(ps.product_code, p.item_code)) AS total_products,
-               COALESCE(SUM(b.qty - COALESCE(b.sold_qty,0)),0)  AS total_stock,
-               COALESCE(SUM(b.qty * b.purchase_price),0)         AS stock_value,
-               MAX(ps.last_ordered_date)               AS last_order
+    like = f"%{search.strip()}%"
+    suppliers = _rows(db, """
+        SELECT DISTINCT s.*
         FROM suppliers s
-        LEFT JOIN product_suppliers ps ON ps.supplier_code = s.code
-        LEFT JOIN products p ON lower(p.supplier_name) = lower(s.name)
-                            AND NOT EXISTS (
-                                SELECT 1 FROM product_suppliers ps2
-                                WHERE ps2.product_code = p.item_code
-                            )
-        LEFT JOIN batches b ON b.supplier_code = s.code
-        WHERE s.name LIKE ? OR s.code LIKE ? OR s.phone LIKE ?
-              OR s.gstin LIKE ? OR s.city LIKE ?
-        GROUP BY s.code
+        LEFT JOIN product_suppliers ps ON ps.supplier_code=s.code
+        LEFT JOIN products p ON p.item_code=ps.product_code
+                             OR LOWER(COALESCE(p.supplier_name,''))=LOWER(s.name)
+        WHERE ?='' OR s.name LIKE ? OR s.code LIKE ?
+          OR COALESCE(s.contact_person,'') LIKE ? OR COALESCE(s.phone,'') LIKE ?
+          OR COALESCE(s.gstin,'') LIKE ? OR COALESCE(p.name,'') LIKE ?
         ORDER BY s.name
-    """, (like,)*5)
+    """, (search.strip(), like, like, like, like, like, like))
+    result = []
+    for supplier in suppliers:
+        summary = get_supplier_summary(db, supplier["code"])
+        inventory = get_supplier_inventory(db, supplier["code"])
+        estimated_profit = sum(
+            max(
+                0,
+                float(item.get("selling_price") or 0)
+                - float(item.get("average_purchase_price") or 0),
+            ) * float(item.get("sold_qty") or 0)
+            for item in inventory
+        )
+        result.append({**supplier, **summary, "estimated_profit": estimated_profit})
+    return result
 
-def save_supplier(db, data: dict, user="system"):
+
+def save_supplier(db, data, user="system"):
     init_supplier_tables(db)
+    code = data.get("code", "").strip()
+    if not code:
+        next_no = _row(db, """
+            SELECT COALESCE(MAX(CAST(SUBSTR(code,4) AS INTEGER)),0)+1 AS n
+            FROM suppliers WHERE code LIKE 'SUP%'
+        """).get("n", 1)
+        code = f"SUP{int(next_no):05d}"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    import time
-    code = data.get("code") or ("SUP" + str(int(time.time()))[-7:])
-    try:
-        with sqlite3.connect(db) as conn:
-            values = (
-                data.get("name",""), data.get("gstin",""),
-                data.get("contact_person",""), data.get("phone",""),
-                data.get("email",""), data.get("address",""),
-                data.get("city",""), data.get("state",""),
-                data.get("pincode",""),
-                int(data.get("payment_terms_days",30) or 30),
-                float(data.get("credit_limit",0) or 0),
-                data.get("status","Active"), data.get("notes",""),
-            )
-            exists = conn.execute(
-                "SELECT 1 FROM suppliers WHERE code=? LIMIT 1", (code,)
-            ).fetchone()
-            if exists:
-                conn.execute("""
-                    UPDATE suppliers SET
-                        name=?, gstin=?, contact_person=?, phone=?, email=?,
-                        address=?, city=?, state=?, pincode=?,
-                        payment_terms_days=?, credit_limit=?, status=?, notes=?
-                    WHERE code=?
-                """, values + (code,))
-            else:
-                conn.execute("""
-                    INSERT INTO suppliers(code,name,gstin,contact_person,phone,email,
-                        address,city,state,pincode,payment_terms_days,credit_limit,
-                        status,notes,created_at,created_by)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (code,) + values + (now, user))
-            conn.commit()
-        return code
-    except Exception as e:
-        print("save_supplier:", e); return None
+    with sqlite3.connect(db) as conn:
+        conn.execute("""
+            INSERT INTO suppliers
+            (code,name,gstin,contact_person,phone,email,address,city,state,pincode,
+             payment_terms_days,credit_limit,current_balance,status,notes,
+             created_at,created_by)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(code) DO UPDATE SET
+              name=excluded.name, gstin=excluded.gstin,
+              contact_person=excluded.contact_person, phone=excluded.phone,
+              email=excluded.email, address=excluded.address, city=excluded.city,
+              state=excluded.state, pincode=excluded.pincode,
+              payment_terms_days=excluded.payment_terms_days,
+              credit_limit=excluded.credit_limit,
+              current_balance=excluded.current_balance,
+              status=excluded.status, notes=excluded.notes
+        """, (
+            code, data.get("name", ""), data.get("gstin", ""),
+            data.get("contact_person", ""), data.get("phone", ""),
+            data.get("email", ""), data.get("address", ""),
+            data.get("city", ""), data.get("state", ""), data.get("pincode", ""),
+            int(data.get("payment_terms_days") or 0),
+            float(data.get("credit_limit") or 0),
+            float(data.get("current_balance") or 0),
+            data.get("status", "Active"), data.get("notes", ""), now, user,
+        ))
+    return code
 
-def get_supplier_inventory(db, sup_code):
-    """All products + their batches for this supplier."""
-    sup = _qone(db, "SELECT name FROM suppliers WHERE code=?", (sup_code,))
-    sup_name = sup.get("name", "")
-    products = _q(db, """
-        SELECT ps.product_code, p.name AS product_name,
-               ps.supplier_product_code AS sup_sku,
-               ps.unit_price, ps.moq, ps.lead_time_days, ps.is_primary,
-               ps.last_ordered_date,
-               COALESCE(SUM(b.qty - COALESCE(b.sold_qty,0)), 0) AS available_stock,
-               COALESCE(SUM(b.qty), 0)                           AS total_received,
-               COALESCE(SUM(b.sold_qty), 0)                      AS total_sold
-        FROM product_suppliers ps
-        JOIN products p ON p.item_code = ps.product_code
-        LEFT JOIN batches b ON b.product_code = ps.product_code
-                           AND b.supplier_code = ?
-        WHERE ps.supplier_code = ?
-        GROUP BY ps.product_code
-        ORDER BY p.name
-    """, (sup_code, sup_code))
-
-    for prod in products:
-        prod["batches"] = _q(db, """
-            SELECT batch_no, qty, COALESCE(sold_qty,0) AS sold_qty,
-                   (qty - COALESCE(sold_qty,0)) AS available,
-                   manufacture_date, expiry_date,
-                   purchase_price, mrp, created_at
-            FROM batches
-            WHERE product_code=? AND supplier_code=?
-            ORDER BY expiry_date ASC, created_at DESC
-        """, (prod["product_code"], sup_code))
-
-    linked_codes = {p.get("product_code") for p in products}
-    if sup_name:
-        legacy_products = _q(db, """
-            SELECT p.item_code AS product_code, p.name AS product_name,
-                   p.supplier_code AS sup_sku,
-                   p.last_purchase_price AS unit_price,
-                   1 AS moq,
-                   p.lead_time_days AS lead_time_days,
-                   0 AS is_primary,
-                   '' AS last_ordered_date,
-                   p.stock AS available_stock,
-                   p.opening_stock AS total_received,
-                   0 AS total_sold
-            FROM products p
-            WHERE lower(p.supplier_name) = lower(?)
-            ORDER BY p.name
-        """, (sup_name,))
-        for prod in legacy_products:
-            if prod.get("product_code") in linked_codes:
-                continue
-            prod["batches"] = []
-            products.append(prod)
-    return products
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SHARED STYLE HELPERS
+# UI helpers
 # ─────────────────────────────────────────────────────────────────────────────
-_BTN_PRIMARY = f"""
-    QPushButton {{
-        background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-            stop:0 {C['accent']}, stop:1 {C['accent_dark']});
-        color: white; border: none; border-radius: 10px;
-        font-size: 13px; font-weight: 700; padding: 0 18px;
-    }}
-    QPushButton:hover {{
-        background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-            stop:0 {C['accent_dark']}, stop:1 {C['accent']});
-    }}
-"""
 
-_TABLE_SS = f"""
-QTableWidget {{
-    background: {C['bg_white']}; border: none;
-    gridline-color: {C['border']}; font-size: 13px; color: {C['text']};
-    selection-background-color: {C['blue_tint']};
-    selection-color: {C['text']}; outline: none;
-}}
-QTableWidget::item {{ padding: 10px 12px; border-bottom: 1px solid {C['border']}; }}
-QTableWidget::item:selected {{ background: {C['blue_tint']}; }}
-QTableWidget::item:hover {{ background: {C['hover_bg']}; }}
-QHeaderView::section {{
-    background: {C['bg_panel']}; color: {C['text2']};
-    font-size: 11px; font-weight: 700; padding: 8px 12px;
-    border: none; border-bottom: 1.5px solid {C['border']};
-    text-transform: uppercase; letter-spacing: 0.5px;
-}}
-"""
+def _button(text, primary=False):
+    button = QPushButton(text)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setStyleSheet(BTN_PRIMARY if primary else BTN_SECONDARY)
+    return button
 
-def _sep_line():
-    f = QFrame(); f.setFrameShape(QFrame.Shape.HLine)
-    f.setStyleSheet(f"background:{C['border']};border:none;max-height:1px;")
-    return f
 
-def _card_frame():
-    f = QFrame()
-    f.setStyleSheet(
+def _card():
+    frame = QFrame()
+    frame.setStyleSheet(
         f"QFrame{{background:{C['bg_white']};border:1px solid {C['border']};"
-        f"border-radius:12px;}}")
-    return f
+        "border-radius:12px;}}"
+    )
+    return frame
 
-def _section_lbl(text, icon=""):
-    l = QLabel(f"{icon}  {text}" if icon else text)
-    l.setStyleSheet(SEC_HDR_SS); return l
 
-def _field_lbl(text):
-    l = QLabel(text); l.setStyleSheet(LABEL_SS); return l
+def _table(headers, stretch=True):
+    table = QTableWidget(0, len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.verticalHeader().setVisible(False)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setAlternatingRowColors(True)
+    table.setStyleSheet(TABLE_SS)
+    if stretch:
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    else:
+        table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setStretchLastSection(True)
+    return table
 
-def _expiry_color(expiry_str):
-    """Return color based on expiry proximity."""
-    if not expiry_str or expiry_str == "—": return C['text2']
-    try:
-        exp = datetime.datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
-        today = datetime.date.today()
-        days = (exp - today).days
-        if days < 0:   return "#dc2626"   # expired
-        if days < 30:  return "#d97706"   # expiring soon
-        if days < 90:  return "#ca8a04"   # within 3 months
-        return C['success']
-    except: return C['text2']
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SLIDE PANEL  (same as product_page._SlidePanel)
-# ─────────────────────────────────────────────────────────────────────────────
-class _SlidePanel(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setVisible(False)
-        self._open = False
-        self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(280)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-    def _clear_anim_finished(self):
-        try:
-            self._anim.finished.disconnect()
-        except TypeError:
-            pass
-
-    def resize_to_parent(self):
-        p = self.parent()
-        if p: self.setGeometry(0, 0, p.width(), p.height())
-
-    def slide_in(self):
-        self._clear_anim_finished()
-        self._open = True
-        self.resize_to_parent(); self.setVisible(True); self.raise_()
-        p = self.parent(); W = p.width() if p else 1200; H = p.height() if p else 800
-        self._anim.setStartValue(QRect(W, 0, W, H))
-        self._anim.setEndValue(QRect(0, 0, W, H))
-        self._anim.start()
-
-    def slide_out(self):
-        if not self._open and not self.isVisible():
-            return
-        self._clear_anim_finished()
-        self._open = False
-        p = self.parent(); W = p.width() if p else 1200; H = p.height() if p else 800
-        self._anim.setStartValue(QRect(0, 0, W, H))
-        self._anim.setEndValue(QRect(W, 0, W, H))
-        self._anim.finished.connect(lambda: self.setVisible(False))
-        self._anim.start()
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SUPPLIER DETAIL VIEW  (inventory breakdown when clicking a supplier)
-# ─────────────────────────────────────────────────────────────────────────────
-class SupplierDetailWidget(QWidget):
-    """Shows supplier info + product inventory with batches & expiry."""
-    back = pyqtSignal()
-
-    def __init__(self, db_name, parent=None):
-        super().__init__(parent)
-        self.db_name = db_name
-        self.setStyleSheet(f"background:{C['bg_light']};")
-
-        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-
-        # ── Top bar ──────────────────────────────────────────
-        top = QFrame(); top.setFixedHeight(56)
-        top.setStyleSheet("background:#f5f5f7;border-bottom:1px solid #d2d2d7;")
-        tl = QHBoxLayout(top); tl.setContentsMargins(24,0,24,0); tl.setSpacing(12)
-
-        back_btn = QPushButton("← Back")
-        back_btn.setFixedSize(80, 30)
-        back_btn.setStyleSheet("""
-            QPushButton { background:rgba(0,0,0,0.06); color:#1d1d1f;
-                border:1px solid rgba(0,0,0,0.12); border-radius:15px;
-                font-size:13px; font-weight:500; }
-            QPushButton:hover { background:rgba(0,0,0,0.10); }
-        """)
-        back_btn.clicked.connect(self.back)
-        tl.addWidget(back_btn)
-
-        self._top_title = QLabel("Supplier")
-        self._top_title.setFont(_F(15, bold=True))
-        self._top_title.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-        tl.addWidget(self._top_title); tl.addStretch()
-        root.addWidget(top)
-
-        # ── Scroll body ──────────────────────────────────────
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(f"background:{C['bg_light']};")
-        self._body = QWidget(); self._body.setStyleSheet(f"background:{C['bg_light']};")
-        self._body_lay = QVBoxLayout(self._body)
-        self._body_lay.setContentsMargins(24,20,24,24); self._body_lay.setSpacing(16)
-        scroll.setWidget(self._body)
-        root.addWidget(scroll, 1)
-
-    def load(self, sup_code, sup_name):
-        self._top_title.setText(sup_name)
-        # Clear
-        while self._body_lay.count():
-            item = self._body_lay.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
-        sup = _qone(self.db_name,
-                    "SELECT * FROM suppliers WHERE code=?", (sup_code,))
-        prods = get_supplier_inventory(self.db_name, sup_code)
-
-        # ── Supplier info card ────────────────────────────────
-        info_card = _card_frame()
-        info_lay = QVBoxLayout(info_card)
-        info_lay.setContentsMargins(20,16,20,16); info_lay.setSpacing(12)
-
-        # Header row
-        hdr = QHBoxLayout(); hdr.setSpacing(12)
-        icon = QLabel("🏭")
-        icon.setStyleSheet("font-size:28px;background:transparent;border:none;")
-        name_col = QVBoxLayout(); name_col.setSpacing(2)
-        n = QLabel(sup.get("name","—")); n.setFont(_F(16, bold=True))
-        n.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-        c = QLabel(f"Code: {sup_code}  ·  {sup.get('gstin','') or 'No GSTIN'}")
-        c.setStyleSheet(f"font-size:12px;color:{C['text3']};background:transparent;border:none;")
-        name_col.addWidget(n); name_col.addWidget(c)
-        hdr.addWidget(icon); hdr.addLayout(name_col); hdr.addStretch()
-
-        status = sup.get("status","Active")
-        st_lbl = QLabel(f"  {status}  ")
-        bg = "#f0fdf4" if status=="Active" else "#fef2f2"
-        fg = "#16a34a" if status=="Active" else "#dc2626"
-        st_lbl.setStyleSheet(
-            f"background:{bg};color:{fg};border-radius:6px;"
-            f"font-size:12px;font-weight:700;padding:4px 0;")
-        hdr.addWidget(st_lbl)
-        info_lay.addLayout(hdr)
-        info_lay.addWidget(_sep_line())
-
-        # Details grid
-        dg = QGridLayout(); dg.setSpacing(0)
-        dg.setColumnMinimumWidth(0, 140); dg.setColumnMinimumWidth(2, 140)
-        ROW_SS = f"font-size:13px;color:{C['text']};background:transparent;border:none;padding:8px 0;border-bottom:1px solid {C['border']};"
-        LBL_SS2 = f"font-size:12px;color:{C['text3']};background:transparent;border:none;padding:8px 0;border-bottom:1px solid {C['border']};"
-
-        fields = [
-            ("Contact", sup.get("contact_person","—") or "—"),
-            ("Phone",   sup.get("phone","—") or "—"),
-            ("Email",   sup.get("email","—") or "—"),
-            ("Address", f"{sup.get('address','')} {sup.get('city','')} {sup.get('state','')} {sup.get('pincode','')}".strip() or "—"),
-            ("Payment Terms", f"{sup.get('payment_terms_days',30) or 30} days"),
-            ("Credit Limit",  f"₹{(sup.get('credit_limit') or 0):,.0f}"),
-        ]
-        for i, (k, v) in enumerate(fields):
-            r, c_off = divmod(i, 2)
-            kl = QLabel(k); kl.setStyleSheet(LBL_SS2)
-            vl = QLabel(str(v)); vl.setStyleSheet(ROW_SS); vl.setWordWrap(True)
-            dg.addWidget(kl, r, c_off*2)
-            dg.addWidget(vl, r, c_off*2+1)
-        info_lay.addLayout(dg)
-
-        # Stat pills
-        total_stock = sum(p.get("available_stock",0) or 0 for p in prods)
-        total_val   = sum((p.get("available_stock",0) or 0) * (p.get("unit_price",0) or 0) for p in prods)
-        pills_row   = QHBoxLayout(); pills_row.setSpacing(10)
-
-        def _pill(icon_t, label, val, color):
-            pf = QFrame()
-            pf.setStyleSheet(
-                f"QFrame{{background:{C['bg_panel']};border:1px solid {C['border']};"
-                f"border-radius:8px;}}")
-            pl = QVBoxLayout(pf); pl.setContentsMargins(12,8,12,8); pl.setSpacing(2)
-            vl2 = QLabel(str(val)); vl2.setFont(_F(16,bold=True))
-            vl2.setStyleSheet(f"color:{color};background:transparent;border:none;")
-            ll2 = QLabel(f"{icon_t} {label}")
-            ll2.setStyleSheet(f"font-size:10px;color:{C['text3']};background:transparent;border:none;")
-            pl.addWidget(vl2); pl.addWidget(ll2)
-            return pf
-
-        pills_row.addWidget(_pill("📦","Products", len(prods), C['blue']))
-        pills_row.addWidget(_pill("🗃️","Total Stock", total_stock, C['success']))
-        pills_row.addWidget(_pill("💰","Stock Value", f"₹{total_val:,.0f}", C['warning']))
-        info_lay.addLayout(pills_row)
-        self._body_lay.addWidget(info_card)
-
-        # ── Inventory section ─────────────────────────────────
-        if not prods:
-            empty = QLabel("No products linked to this supplier yet.")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setStyleSheet(f"font-size:14px;color:{C['text3']};background:transparent;border:none;padding:40px;")
-            self._body_lay.addWidget(empty)
-            return
-
-        inv_title = _section_lbl("Linked Products", "📊")
-        self._body_lay.addWidget(inv_title)
-
-        table_card = _card_frame()
-        tc_lay = QVBoxLayout(table_card)
-        tc_lay.setContentsMargins(16, 14, 16, 16)
-        tc_lay.setSpacing(10)
-
-        table = QTableWidget(len(prods), 11)
-        table.setHorizontalHeaderLabels([
-            "Product Code", "Product", "Primary", "Supplier SKU",
-            "Available", "Received", "Sold", "Last Price",
-            "MOQ", "Lead", "Last Order"
-        ])
-        table.setStyleSheet(_TABLE_SS)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        table.verticalHeader().setVisible(False)
-        table.setAlternatingRowColors(True)
-        table.setShowGrid(True)
-        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        hdr = table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-
-        for r, prod in enumerate(prods):
-            table.setRowHeight(r, 42)
-            avail = prod.get("available_stock", 0) or 0
-            values = [
-                prod.get("product_code", "") or "",
-                prod.get("product_name", "") or "",
-                "Yes" if prod.get("is_primary") else "",
-                prod.get("sup_sku", "") or "",
-                str(avail),
-                str(prod.get("total_received", 0) or 0),
-                str(prod.get("total_sold", 0) or 0),
-                f"₹{(prod.get('unit_price') or 0):,.2f}",
-                str(prod.get("moq", 1) or 1),
-                f"{prod.get('lead_time_days') or 0}d",
-                (prod.get("last_ordered_date", "") or "")[:10] or "—",
-            ]
-            for c, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                if c in (4, 5, 6, 8):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if c == 2 and value:
-                    item.setForeground(QColor(C["success"]))
-                if c == 4:
-                    item.setForeground(QColor(C["success"] if avail > 0 else C["accent"]))
-                if c == 7:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(r, c, item)
-
-        table.setFixedHeight(min(44 * len(prods) + 46, 420))
-        tc_lay.addWidget(table)
-        self._body_lay.addWidget(table_card)
-        self._body_lay.addStretch()
-        return
-
-        for prod in prods:
-            pcard = _card_frame()
-            pl = QVBoxLayout(pcard); pl.setContentsMargins(16,14,16,14); pl.setSpacing(10)
-
-            # Product header
-            ph = QHBoxLayout(); ph.setSpacing(10)
-            pn = QLabel(prod.get("product_name","—")); pn.setFont(_F(13,bold=True))
-            pn.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-            ph.addWidget(pn)
-            if prod.get("is_primary"):
-                pb = QLabel("  ★ Primary  ")
-                pb.setStyleSheet("background:#f0fdf4;color:#16a34a;border-radius:5px;"
-                                 "font-size:11px;font-weight:700;padding:2px 0;")
-                ph.addWidget(pb)
-            ph.addStretch()
-            pc = QLabel(prod.get("product_code",""))
-            pc.setStyleSheet(f"font-size:11px;color:{C['text3']};background:transparent;border:none;")
-            ph.addWidget(pc)
-            pl.addLayout(ph)
-
-            # Stock summary row
-            sr = QHBoxLayout(); sr.setSpacing(20)
-            def _sm(lbl, val, color=None):
-                sw2 = QVBoxLayout(); sw2.setSpacing(1)
-                sv2 = QLabel(str(val)); sv2.setFont(_F(15,bold=True))
-                sv2.setStyleSheet(f"color:{color or C['text']};background:transparent;border:none;")
-                sl2 = QLabel(lbl); sl2.setStyleSheet(f"font-size:10px;color:{C['text3']};background:transparent;border:none;")
-                sw2.addWidget(sv2); sw2.addWidget(sl2)
-                w2 = QWidget(); w2.setLayout(sw2); return w2
-
-            avail = prod.get("available_stock",0) or 0
-            total_r = prod.get("total_received",0) or 0
-            total_s = prod.get("total_sold",0) or 0
-            color_a = C['success'] if avail > 0 else C['accent']
-
-            sr.addWidget(_sm("Available", avail, color_a))
-            sr.addWidget(_sm("Total Received", total_r, C['blue']))
-            sr.addWidget(_sm("Sold", total_s, C['text2']))
-            sr.addWidget(_sm("Last Price", f"₹{(prod.get('unit_price') or 0):.2f}"))
-            sr.addWidget(_sm("Lead Time", f"{prod.get('lead_time_days') or 0}d"))
-            if prod.get("sup_sku"):
-                sr.addWidget(_sm("Sup SKU", prod["sup_sku"]))
-            sr.addStretch()
-            pl.addLayout(sr)
-
-            # Batch table
-            batches = prod.get("batches",[])
-            if batches:
-                pl.addWidget(_sep_line())
-                bl = QLabel(f"Batches ({len(batches)})")
-                bl.setStyleSheet(f"font-size:11px;font-weight:700;color:{C['text2']};background:transparent;border:none;")
-                pl.addWidget(bl)
-
-                bt = QTableWidget(len(batches), 7)
-                bt.setHorizontalHeaderLabels(
-                    ["Batch No","Qty","Sold","Available","Mfg Date","Expiry","Price"])
-                bt.setStyleSheet(_TABLE_SS)
-                bt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-                bt.verticalHeader().setVisible(False)
-                bt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-                bt.horizontalHeader().setStretchLastSection(True)
-                bt.setFixedHeight(min(44*len(batches)+44, 220))
-                bt.setShowGrid(True)
-                bt.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-                today = datetime.date.today()
-                for ri, b in enumerate(batches):
-                    bt.setRowHeight(ri, 44)
-                    exp_str = (b.get("expiry_date","") or "")[:10]
-                    exp_color = _expiry_color(exp_str)
-
-                    vals = [
-                        b.get("batch_no","—"),
-                        str(b.get("qty",0)),
-                        str(b.get("sold_qty",0)),
-                        str(b.get("available",0)),
-                        (b.get("manufacture_date","")[:10] or "—"),
-                        exp_str or "—",
-                        f"₹{(b.get('purchase_price') or 0):.2f}",
-                    ]
-                    for ci, val in enumerate(vals):
-                        item = QTableWidgetItem(val)
-                        color = exp_color if ci == 5 else C['text']
-                        item.setForeground(QColor(color))
-                        if ci == 5 and exp_str:
-                            try:
-                                exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
-                                days_left = (exp - today).days
-                                if days_left < 0:
-                                    item.setBackground(QColor("#fef2f2"))
-                                    item.setText(f"⚠ {exp_str} (Expired)")
-                                elif days_left < 30:
-                                    item.setBackground(QColor("#fffbeb"))
-                                    item.setText(f"⚡ {exp_str} ({days_left}d)")
-                            except: pass
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                        bt.setItem(ri, ci, item)
-                pl.addWidget(bt)
+def _fill_table(table, rows, columns, currency_columns=(), status_column=None):
+    table.setRowCount(0)
+    for row_data in rows:
+        row = table.rowCount()
+        table.insertRow(row)
+        for column, key in enumerate(columns):
+            value = row_data.get(key, "")
+            if column in currency_columns:
+                text = _money(value)
+            elif isinstance(value, float):
+                text = _number(value)
             else:
-                no_batch = QLabel("No batch records yet.")
-                no_batch.setStyleSheet(f"font-size:12px;color:{C['text3']};background:transparent;border:none;")
-                pl.addWidget(no_batch)
+                text = str(value if value not in (None, "") else "—")
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if status_column == column:
+                colors = {
+                    "Paid": C["success"], "In Stock": C["success"],
+                    "Pending": C["warning"], "Partially Paid": C["warning"],
+                    "Low Stock": C["warning"], "Out of Stock": C.get("danger", "#E53935"),
+                }
+                item.setForeground(QColor(colors.get(text, C["text"])))
+                font = item.font(); font.setBold(True); item.setFont(font)
+            table.setItem(row, column, item)
+        table.setRowHeight(row, 42)
 
-            self._body_lay.addWidget(pcard)
 
-        self._body_lay.addStretch()
+def _stat_card(title, value, color=None):
+    frame = _card()
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 12, 14, 12)
+    title_label = QLabel(title)
+    title_label.setStyleSheet(
+        f"font-size:10px;font-weight:700;color:{C['text3']};"
+        "background:transparent;border:none;"
+    )
+    value_label = QLabel(str(value))
+    value_label.setWordWrap(True)
+    value_label.setStyleSheet(
+        f"font-size:17px;font-weight:700;color:{color or C['text']};"
+        "background:transparent;border:none;"
+    )
+    layout.addWidget(title_label)
+    layout.addWidget(value_label)
+    return frame
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SUPPLIER FORM  (Add / Edit)
-# ─────────────────────────────────────────────────────────────────────────────
+class InvoiceDetailDialog(QDialog):
+    def __init__(self, db, supplier_code, invoice_number, parent=None):
+        super().__init__(parent)
+        apply_app_icon(self)
+        self.setWindowTitle(f"Invoice {invoice_number}")
+        self.resize(1120, 560)
+        root = QVBoxLayout(self)
+        title = QLabel(f"Invoice Details  ·  {invoice_number}")
+        title.setStyleSheet(
+            f"font-size:20px;font-weight:700;color:{C['text']};padding:8px;"
+        )
+        root.addWidget(title)
+        table = _table([
+            "Product Code", "Product Name", "Category", "Size", "Color",
+            "Quantity Purchased", "Purchase Price", "Selling Price", "Total Value",
+        ], stretch=False)
+        items = get_invoice_items(db, supplier_code, invoice_number)
+        _fill_table(
+            table, items,
+            ["product_code", "product_name", "category", "size", "color",
+             "quantity", "purchase_price", "selling_price", "total_value"],
+            currency_columns=(6, 7, 8),
+        )
+        root.addWidget(table)
+        close = _button("Close")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout(); row.addStretch(); row.addWidget(close)
+        root.addLayout(row)
+
+
+class ProductDetailDialog(QDialog):
+    def __init__(self, supplier_name, product, parent=None):
+        super().__init__(parent)
+        apply_app_icon(self)
+        self.setWindowTitle(product.get("product_name") or "Product Detail")
+        self.resize(1050, 440)
+        root = QVBoxLayout(self)
+        title = QLabel(f"Inventory Detail  ·  {product.get('product_name','')}")
+        title.setStyleSheet(
+            f"font-size:20px;font-weight:700;color:{C['text']};padding:8px;"
+        )
+        root.addWidget(title)
+        table = _table([
+            "Product Code", "Product Name", "Category", "Brand", "Size", "Color",
+            "Supplier Name", "Total Purchased Qty", "Total Sold Qty",
+            "Available Stock", "Current Purchase Price", "Current Selling Price",
+            "Total Stock Value", "Last Purchase Date", "Last Invoice Number",
+        ], stretch=False)
+        detail = dict(product)
+        detail["supplier_name"] = supplier_name
+        _fill_table(
+            table, [detail],
+            ["product_code", "product_name", "category", "brand", "size", "color",
+             "supplier_name", "total_purchased_qty", "sold_qty", "available_stock",
+             "last_purchase_price", "selling_price", "current_stock_value",
+             "last_purchase_date", "last_invoice_number"],
+            currency_columns=(10, 11, 12),
+        )
+        root.addWidget(table)
+        close = _button("Close"); close.clicked.connect(self.accept)
+        row = QHBoxLayout(); row.addStretch(); row.addWidget(close)
+        root.addLayout(row)
+
+
 class SupplierFormWidget(QWidget):
-    saved  = pyqtSignal(str)   # emits supplier code
-    cancel = pyqtSignal()
+    saved = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, db_name, current_user="Admin", parent=None):
         super().__init__(parent)
         ensure_global_input_guard()
-        self.db_name      = db_name
+        self.db_name = db_name
         self.current_user = current_user
-        self._edit_code   = None
-        self.setStyleSheet(f"background:{C['bg_light']};" + FIELD_SS)
+        self.edit_code = None
+        self.setStyleSheet(f"background:{C['bg_light']};")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 24)
 
-        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+        top = QHBoxLayout()
+        self.title = QLabel("Add Supplier")
+        self.title.setStyleSheet(
+            f"font-size:22px;font-weight:700;color:{C['text']};"
+        )
+        cancel = _button("Cancel")
+        save = _button("Save Supplier", True)
+        cancel.clicked.connect(self.cancelled)
+        save.clicked.connect(self._save)
+        top.addWidget(self.title); top.addStretch()
+        top.addWidget(cancel); top.addWidget(save)
+        root.addLayout(top)
 
-        # ── Top bar ──────────────────────────────────────────
-        top = QFrame(); top.setFixedHeight(56)
-        top.setStyleSheet("background:#f5f5f7;border-bottom:1px solid #d2d2d7;")
-        tl = QHBoxLayout(top); tl.setContentsMargins(24,0,24,0); tl.setSpacing(12)
-        self._form_title = QLabel("Add Supplier")
-        self._form_title.setFont(_F(15,bold=True))
-        self._form_title.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-        tl.addWidget(self._form_title); tl.addStretch()
-
-        cancel_btn = QPushButton("Cancel"); cancel_btn.setFixedHeight(32)
-        cancel_btn.setStyleSheet(
-            f"QPushButton{{background:rgba(0,0,0,0.06);color:{C['text']};"
-            f"border:1px solid rgba(0,0,0,0.12);border-radius:10px;"
-            f"font-size:13px;font-weight:500;padding:0 16px;}}"
-            f"QPushButton:hover{{background:rgba(0,0,0,0.10);}}")
-        cancel_btn.clicked.connect(self.cancel)
-
-        save_btn = QPushButton("Save Supplier"); save_btn.setFixedHeight(34)
-        save_btn.setStyleSheet(_BTN_PRIMARY)
-        save_btn.clicked.connect(self._save)
-
-        tl.addWidget(cancel_btn); tl.addSpacing(8); tl.addWidget(save_btn)
-        root.addWidget(top)
-
-        # ── Scroll ───────────────────────────────────────────
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(f"background:{C['bg_light']};")
-        body = QWidget(); body.setStyleSheet(f"background:{C['bg_light']};")
-        bl = QVBoxLayout(body); bl.setContentsMargins(24,20,24,24); bl.setSpacing(16)
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setContentsMargins(4, 10, 4, 10)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(1, 1); grid.setColumnStretch(3, 1)
 
-        def _sec(title, icon):
-            sec = QFrame()
-            sec.setStyleSheet(
-                f"QFrame{{background:{C['bg_white']};border:1px solid {C['border']};"
-                f"border-radius:12px;}}")
-            sl = QVBoxLayout(sec); sl.setContentsMargins(20,16,20,16); sl.setSpacing(12)
-            hd = QLabel(f"{icon}  {title}"); hd.setStyleSheet(SEC_HDR_SS)
-            sl.addWidget(hd); sl.addWidget(_sep_line())
-            g = QGridLayout(); g.setHorizontalSpacing(12); g.setVerticalSpacing(10)
-            g.setColumnMinimumWidth(0, 124)
-            g.setColumnMinimumWidth(2, 124)
-            g.setColumnStretch(1,1); g.setColumnStretch(3,1)
-            sl.addLayout(g)
-            return sec, g
-
-        def _normalize_field(widget):
+        def line(placeholder=""):
+            widget = QLineEdit()
+            widget.setPlaceholderText(placeholder)
             widget.setFixedHeight(38)
-            widget.setMinimumWidth(260)
-            widget.setSizePolicy(
-                QSizePolicy.Policy.Expanding,
-                QSizePolicy.Policy.Fixed,
-            )
-            existing = widget.styleSheet()
-            if isinstance(widget, (QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox)):
-                widget.setStyleSheet(FIELD_SS + existing)
+            widget.setStyleSheet(FIELD_SS)
+            return widget
 
-        def _add(g, r, c, label, widget, span=1, hint="", req=False):
-            _normalize_field(widget)
-            lbl_text = f"{label} {'*' if req else ''}"
-            lbl = QLabel(lbl_text); lbl.setStyleSheet(LABEL_SS)
-            lbl.setMinimumWidth(118)
-            g.addWidget(lbl, r, c*2)
-            if hint:
-                wrap = QWidget()
-                wrap.setStyleSheet("background:transparent;border:none;")
-                wl = QVBoxLayout(wrap); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
-                wl.addWidget(widget)
-                hl = QLabel(hint)
-                hl.setStyleSheet(
-                    f"font-size:10px;color:{C['text3']};"
-                    f"background:transparent;border:none;padding:0;margin:0;"
-                )
-                wl.addWidget(hl)
-                g.addWidget(wrap, r, c*2+1, 1, span*2-1)
-            else:
-                g.addWidget(widget, r, c*2+1, 1, span*2-1)
+        self.code = line("Auto-generated if blank")
+        self.name = line("Supplier business name")
+        self.contact = line("Contact person")
+        self.phone = line("Phone number")
+        self.email = line("Email")
+        self.gstin = line("GSTIN")
+        self.address = line("Street / area")
+        self.city = line("City")
+        self.state = line("State")
+        self.pincode = line("PIN code")
+        self.terms = QSpinBox(); self.terms.setRange(0, 365)
+        self.terms.setSuffix(" days"); self.terms.setFixedHeight(38)
+        self.terms.setStyleSheet(_NO_ARROW)
+        self.credit = QDoubleSpinBox(); self.credit.setRange(0, 999999999)
+        self.credit.setPrefix("₹ "); self.credit.setFixedHeight(38)
+        self.credit.setStyleSheet(_NO_ARROW)
+        self.balance = QDoubleSpinBox(); self.balance.setRange(0, 999999999)
+        self.balance.setPrefix("₹ "); self.balance.setFixedHeight(38)
+        self.balance.setStyleSheet(_NO_ARROW)
+        self.status = QComboBox(); self.status.addItems(
+            ["Active", "Inactive", "Blacklisted"]
+        )
+        self.status.setFixedHeight(38); _apply_combo_delegate(self.status)
+        self.notes = QTextEdit(); self.notes.setFixedHeight(80)
+        self.notes.setPlaceholderText("Supplier notes")
+        self.notes.setStyleSheet(FIELD_SS)
 
-        def _le(ph=""): e = QLineEdit(); e.setPlaceholderText(ph); e.setFixedHeight(38); return e
-        def _sp(suf="",max_v=999999):
-            s = QDoubleSpinBox() if "." in suf or "₹" in suf else QSpinBox()
-            s.setRange(0,max_v); s.setSuffix(suf); s.setFixedHeight(38)
-            s.setStyleSheet(_NO_ARROW); return s
-
-        # ── Section 1: Basic Info ─────────────────────────────
-        sec1, g1 = _sec("Basic Information", "🏭")
-        self.f_name    = _le("e.g. Raymond Ltd"); self.f_code = _le("e.g. SUP0001")
-        self.f_contact = _le("Contact person name")
-        self.f_status  = QComboBox(); self.f_status.addItems(["Active","Inactive","Blacklisted"])
-        self.f_status.setFixedHeight(38)
-        _apply_combo_delegate(self.f_status)
-        _add(g1, 0, 0, "Supplier Name", self.f_name, req=True)
-        _add(g1, 0, 1, "Status",        self.f_status)
-        _add(g1, 1, 0, "Supplier Code", self.f_code, hint="Leave blank to auto-generate on save")
-        _add(g1, 1, 1, "Contact Person",self.f_contact)
-        bl.addWidget(sec1)
-
-        # ── Section 2: Contact ────────────────────────────────
-        sec2, g2 = _sec("Contact Details", "📞")
-        self.f_phone = _le("+91 98765 43210")
-        self.f_email = _le("supplier@example.com")
-        self.f_gstin = _le("29AAAAA0000A1Z5")
-        _add(g2, 0, 0, "Phone", self.f_phone)
-        _add(g2, 0, 1, "Email", self.f_email)
-        _add(g2, 1, 0, "GSTIN", self.f_gstin, span=2,
-             hint="For GSTR-2A reconciliation")
-        bl.addWidget(sec2)
-
-        # ── Section 3: Address ────────────────────────────────
-        sec3, g3 = _sec("Address", "📍")
-        self.f_address = _le("Street / Area")
-        self.f_city    = _le("City")
-        self.f_state   = _le("State")
-        self.f_pincode = _le("PIN Code")
-        _add(g3, 0, 0, "Address", self.f_address, span=2)
-        _add(g3, 1, 0, "City",    self.f_city)
-        _add(g3, 1, 1, "State",   self.f_state)
-        _add(g3, 2, 0, "Pincode", self.f_pincode)
-        bl.addWidget(sec3)
-
-        # ── Section 4: Terms ──────────────────────────────────
-        sec4, g4 = _sec("Payment & Terms", "💳")
-        self.f_terms  = QSpinBox(); self.f_terms.setRange(0,365); self.f_terms.setSuffix(" days"); self.f_terms.setFixedHeight(38); self.f_terms.setStyleSheet(_NO_ARROW)
-        self.f_credit = QDoubleSpinBox(); self.f_credit.setRange(0,99999999); self.f_credit.setPrefix("₹ "); self.f_credit.setFixedHeight(38); self.f_credit.setStyleSheet(_NO_ARROW)
-        self.f_notes  = QTextEdit(); self.f_notes.setFixedHeight(68); self.f_notes.setPlaceholderText("Additional notes about this supplier…")
-        self.f_notes.setStyleSheet(FIELD_SS)
-        _add(g4, 0, 0, "Payment Terms", self.f_terms)
-        _add(g4, 0, 1, "Credit Limit",  self.f_credit)
-        lbl_notes = QLabel("Notes"); lbl_notes.setStyleSheet(LABEL_SS)
-        g4.addWidget(lbl_notes, 1, 0)
-        g4.addWidget(self.f_notes, 1, 1, 1, 3)
-        bl.addWidget(sec4)
-        bl.addStretch()
+        fields = [
+            ("Supplier Code", self.code), ("Supplier Name *", self.name),
+            ("Contact Person", self.contact), ("Phone", self.phone),
+            ("Email", self.email), ("GSTIN", self.gstin),
+            ("Address", self.address), ("City", self.city),
+            ("State", self.state), ("PIN Code", self.pincode),
+            ("Payment Terms", self.terms), ("Credit Limit", self.credit),
+            ("Current Balance", self.balance), ("Status", self.status),
+        ]
+        for index, (label, widget) in enumerate(fields):
+            row, side = divmod(index, 2)
+            label_widget = QLabel(label); label_widget.setStyleSheet(LABEL_SS)
+            grid.addWidget(label_widget, row, side * 2)
+            grid.addWidget(widget, row, side * 2 + 1)
+        notes_row = (len(fields) + 1) // 2
+        notes_label = QLabel("Notes"); notes_label.setStyleSheet(LABEL_SS)
+        grid.addWidget(notes_label, notes_row, 0)
+        grid.addWidget(self.notes, notes_row, 1, 1, 3)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
     def load_for_add(self):
-        self._edit_code = None
-        self._form_title.setText("Add Supplier")
-        self.f_name.clear(); self.f_code.clear(); self.f_contact.clear()
-        self.f_phone.clear(); self.f_email.clear(); self.f_gstin.clear()
-        self.f_address.clear(); self.f_city.clear(); self.f_state.clear()
-        self.f_pincode.clear(); self.f_terms.setValue(30)
-        self.f_credit.setValue(0); self.f_notes.clear()
-        self.f_status.setCurrentIndex(0)
+        self.edit_code = None
+        self.title.setText("Add Supplier")
+        for field in (
+            self.code, self.name, self.contact, self.phone, self.email,
+            self.gstin, self.address, self.city, self.state, self.pincode,
+        ):
+            field.clear()
+        self.terms.setValue(30)
+        self.credit.setValue(0); self.balance.setValue(0)
+        self.status.setCurrentIndex(0); self.notes.clear()
+        self.code.setReadOnly(False)
 
     def load_for_edit(self, code):
-        self._edit_code = code
-        self._form_title.setText("Edit Supplier")
-        row = _qone(self.db_name, "SELECT * FROM suppliers WHERE code=?", (code,))
-        if not row: return
-        self.f_name.setText(row.get("name",""))
-        self.f_code.setText(row.get("code",""))
-        self.f_contact.setText(row.get("contact_person",""))
-        self.f_phone.setText(row.get("phone",""))
-        self.f_email.setText(row.get("email",""))
-        self.f_gstin.setText(row.get("gstin",""))
-        self.f_address.setText(row.get("address",""))
-        self.f_city.setText(row.get("city",""))
-        self.f_state.setText(row.get("state",""))
-        self.f_pincode.setText(row.get("pincode",""))
-        self.f_terms.setValue(int(row.get("payment_terms_days",30) or 30))
-        self.f_credit.setValue(float(row.get("credit_limit",0) or 0))
-        self.f_notes.setPlainText(row.get("notes",""))
-        idx = self.f_status.findText(row.get("status","Active"))
-        if idx >= 0: self.f_status.setCurrentIndex(idx)
+        self.edit_code = code
+        supplier = _row(self.db_name, "SELECT * FROM suppliers WHERE code=?", (code,))
+        self.title.setText(f"Edit Supplier  ·  {code}")
+        self.code.setText(code); self.code.setReadOnly(True)
+        self.name.setText(supplier.get("name", ""))
+        self.contact.setText(supplier.get("contact_person", ""))
+        self.phone.setText(supplier.get("phone", ""))
+        self.email.setText(supplier.get("email", ""))
+        self.gstin.setText(supplier.get("gstin", ""))
+        self.address.setText(supplier.get("address", ""))
+        self.city.setText(supplier.get("city", ""))
+        self.state.setText(supplier.get("state", ""))
+        self.pincode.setText(supplier.get("pincode", ""))
+        self.terms.setValue(int(supplier.get("payment_terms_days") or 0))
+        self.credit.setValue(float(supplier.get("credit_limit") or 0))
+        self.balance.setValue(float(supplier.get("current_balance") or 0))
+        index = self.status.findText(supplier.get("status") or "Active")
+        self.status.setCurrentIndex(max(0, index))
+        self.notes.setPlainText(supplier.get("notes", ""))
 
     def _save(self):
-        name = self.f_name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Required", "Supplier Name is required.")
+        if not self.name.text().strip():
+            QMessageBox.warning(self, "Validation", "Supplier name is required.")
+            self.name.setFocus()
             return
-        data = dict(
-            code            = self.f_code.text().strip() or self._edit_code,
-            name            = name,
-            gstin           = self.f_gstin.text().strip(),
-            contact_person  = self.f_contact.text().strip(),
-            phone           = self.f_phone.text().strip(),
-            email           = self.f_email.text().strip(),
-            address         = self.f_address.text().strip(),
-            city            = self.f_city.text().strip(),
-            state           = self.f_state.text().strip(),
-            pincode         = self.f_pincode.text().strip(),
-            payment_terms_days = self.f_terms.value(),
-            credit_limit    = self.f_credit.value(),
-            status          = self.f_status.currentText(),
-            notes           = self.f_notes.toPlainText().strip(),
-        )
-        code = save_supplier(self.db_name, data, self.current_user)
-        if code:
-            self.saved.emit(code)
-        else:
-            QMessageBox.critical(self, "Error", "Could not save supplier.")
+        code = save_supplier(self.db_name, {
+            "code": self.edit_code or self.code.text().strip(),
+            "name": self.name.text().strip(),
+            "contact_person": self.contact.text().strip(),
+            "phone": self.phone.text().strip(),
+            "email": self.email.text().strip(),
+            "gstin": self.gstin.text().strip(),
+            "address": self.address.text().strip(),
+            "city": self.city.text().strip(),
+            "state": self.state.text().strip(),
+            "pincode": self.pincode.text().strip(),
+            "payment_terms_days": self.terms.value(),
+            "credit_limit": self.credit.value(),
+            "current_balance": self.balance.value(),
+            "status": self.status.currentText(),
+            "notes": self.notes.toPlainText().strip(),
+        }, self.current_user)
+        self.saved.emit(code)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SUPPLIER LIST WIDGET
-# ─────────────────────────────────────────────────────────────────────────────
-class SupplierListWidget(QWidget):
-    def __init__(self, db_name, on_add, on_edit, on_view, company_name="", parent=None):
+class SupplierDetailWidget(QWidget):
+    back_requested = pyqtSignal()
+    edit_requested = pyqtSignal(str)
+
+    def __init__(self, db_name, parent=None):
         super().__init__(parent)
         self.db_name = db_name
-        self._on_edit = on_edit
-        self._on_view = on_view
-        self._rows    = []
+        self.supplier_code = ""
+        self.inventory_rows = []
+        self.purchase_rows = []
+        self.setStyleSheet("background:transparent;")
 
-        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-        self.setStyleSheet(f"background:{C['bg_light']};")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 20)
+        top = QHBoxLayout()
+        back = _button("← Suppliers")
+        back.clicked.connect(self.back_requested)
+        self.title = QLabel("Supplier Detail")
+        self.title.setStyleSheet(
+            f"font-size:23px;font-weight:700;color:{C['text']};"
+        )
+        edit = _button("Edit Supplier")
+        edit.clicked.connect(lambda: self.edit_requested.emit(self.supplier_code))
+        top.addWidget(back); top.addSpacing(10); top.addWidget(self.title)
+        top.addStretch(); top.addWidget(edit)
+        root.addLayout(top)
 
-        # ── Top bar ──────────────────────────────────────────
-        top = QFrame(); top.setFixedHeight(56)
-        top.setStyleSheet("background:#f5f5f7;border-bottom:1px solid #d2d2d7;")
-        tl = QHBoxLayout(top); tl.setContentsMargins(24,0,24,0); tl.setSpacing(12)
-        tl.addStretch()
-
-        add_btn = QPushButton("＋  Add Supplier")
-        add_btn.setFixedHeight(38); add_btn.setMinimumWidth(148)
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setStyleSheet(_BTN_PRIMARY)
-        add_btn.clicked.connect(on_add)
-        tl.addWidget(add_btn)
-        root.addWidget(top)
-
-        # ── Content ──────────────────────────────────────────
-        content = QWidget(); content.setStyleSheet(f"background:{C['bg_light']};")
-        cl = QVBoxLayout(content); cl.setContentsMargins(24,16,24,16); cl.setSpacing(12)
-
-        # Search
-        sw = QFrame()
-        sw.setStyleSheet(
-            f"QFrame{{background:{C['bg_white']};border:1.5px solid {C['border']};border-radius:12px;}}")
-        sl = QHBoxLayout(sw); sl.setContentsMargins(12,0,12,0); sl.setSpacing(8)
-        sl.addWidget(QLabel("🔍", styleSheet="font-size:14px;background:transparent;border:none;"))
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Search by name, code, phone, GSTIN, city…")
-        self._search.setFixedHeight(38)
-        self._search.setStyleSheet(f"QLineEdit{{border:none;background:transparent;font-size:13px;color:{C['text']};}}")
-        self._search.textChanged.connect(self._load)
-        sl.addWidget(self._search, 1)
-        cl.addWidget(sw)
-
-        # Table
-        self._table = QTableWidget()
-        self._table.setColumnCount(8)
-        self._table.setHorizontalHeaderLabels([
-            "Supplier", "GSTIN", "Contact", "Phone",
-            "Products", "Stock", "Last Order", "Status"
-        ])
-        self._table.setStyleSheet(_TABLE_SS)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setShowGrid(False)
-        self._table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._table.itemDoubleClicked.connect(self._on_double_click)
-        cl.addWidget(self._table, 1)
-
-        # Bottom count + action hint
-        self._count_lbl = QLabel("")
-        self._count_lbl.setStyleSheet(f"font-size:11px;color:{C['text3']};background:transparent;border:none;")
-        hint = QLabel("Double-click a supplier to view inventory  ·  Right-click to edit")
-        hint.setStyleSheet(f"font-size:11px;color:{C['text3']};background:transparent;border:none;")
-        bot = QHBoxLayout()
-        bot.addWidget(self._count_lbl); bot.addStretch(); bot.addWidget(hint)
-        cl.addLayout(bot)
-
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
+        scroll.setStyleSheet("background:transparent;")
+        body = QWidget(); body.setStyleSheet("background:transparent;")
+        self.body_layout = QVBoxLayout(body)
+        self.body_layout.setContentsMargins(0, 8, 0, 0)
+        self.body_layout.setSpacing(14)
 
-        self._load()
+        self.info_card = _card()
+        self.info_grid = QGridLayout(self.info_card)
+        self.info_grid.setContentsMargins(18, 16, 18, 16)
+        self.info_grid.setHorizontalSpacing(24)
+        self.info_grid.setVerticalSpacing(10)
+        self.body_layout.addWidget(self.info_card)
 
-    def _load(self):
-        search = self._search.text().strip() if hasattr(self,'_search') else ""
-        self._rows = get_suppliers(self.db_name, search)
-        self._table.setRowCount(len(self._rows))
+        self.stats_wrap = QWidget()
+        self.stats_grid = QGridLayout(self.stats_wrap)
+        self.stats_grid.setContentsMargins(0, 0, 0, 0)
+        self.stats_grid.setSpacing(10)
+        self.body_layout.addWidget(self.stats_wrap)
 
-        for i, r in enumerate(self._rows):
-            self._table.setRowHeight(i, 52)
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane{{border:1px solid {C['border']};border-radius:10px;
+                background:white;top:-1px;}}
+            QTabBar::tab{{padding:10px 18px;background:#F5F5F7;color:{C['text2']};
+                border:1px solid {C['border']};}}
+            QTabBar::tab:selected{{background:{C['accent']};color:white;font-weight:700;}}
+        """)
+        self.purchase_table = _table([
+            "Invoice Number", "Purchase Date", "Total Products", "Total Quantity",
+            "Purchase Value", "Discount Amount", "Tax Amount", "Net Amount",
+            "Paid Amount", "Balance Amount", "Payment Status",
+        ], stretch=False)
+        self.purchase_table.cellClicked.connect(self._open_invoice)
+        purchase_page = QWidget(); purchase_layout = QVBoxLayout(purchase_page)
+        purchase_hint = QLabel("Click an invoice number to view its products.")
+        purchase_hint.setStyleSheet(
+            f"font-size:11px;color:{C['text3']};border:none;"
+        )
+        purchase_layout.addWidget(purchase_hint)
+        purchase_layout.addWidget(self.purchase_table)
+        self.tabs.addTab(purchase_page, "PURCHASE HISTORY")
 
-            # Supplier name + city
-            name_w = QWidget(); nl = QVBoxLayout(name_w)
-            nl.setContentsMargins(12,4,4,4); nl.setSpacing(1)
-            n = QLabel(r.get("name","—")); n.setFont(_F(13,bold=True))
-            n.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-            c2 = QLabel(f"{r.get('code','')}  {('· '+r['city']) if r.get('city') else ''}".strip())
-            c2.setStyleSheet(f"font-size:10px;color:{C['text3']};background:transparent;border:none;")
-            nl.addWidget(n); nl.addWidget(c2)
-            self._table.setCellWidget(i, 0, name_w)
+        self.inventory_table = _table([
+            "Product Code", "Product Name", "Category", "Brand", "Size", "Color",
+            "Total Purchased Qty", "Total Sold Qty", "Available Stock",
+            "Reserved Stock", "Last Purchase Date", "Last Purchase Price",
+            "Average Purchase Price", "Current Selling Price", "Current Stock Value",
+            "Reorder Level", "Stock Status",
+        ], stretch=False)
+        self.inventory_table.cellClicked.connect(self._open_product)
+        inventory_page = QWidget(); inventory_layout = QVBoxLayout(inventory_page)
+        inventory_hint = QLabel("Click a product code or name for detailed inventory.")
+        inventory_hint.setStyleSheet(
+            f"font-size:11px;color:{C['text3']};border:none;"
+        )
+        inventory_layout.addWidget(inventory_hint)
+        inventory_layout.addWidget(self.inventory_table)
+        self.tabs.addTab(inventory_page, "INVENTORY FROM THIS SUPPLIER")
 
-            for j, val in enumerate([
-                r.get("gstin","—") or "—",
-                r.get("contact_person","—") or "—",
-                r.get("phone","—") or "—",
-                str(r.get("total_products",0) or 0),
-                str(r.get("total_stock",0) or 0),
-                (r.get("last_order","")[:10] if r.get("last_order") else "—"),
-            ], 1):
-                item = QTableWidgetItem(val)
-                item.setForeground(QColor(C['text2']))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                self._table.setItem(i, j, item)
+        self.insights_page = QWidget()
+        self.insights_layout = QVBoxLayout(self.insights_page)
+        self.tabs.addTab(self.insights_page, "BUSINESS INSIGHTS")
+        self.body_layout.addWidget(self.tabs)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
-            # Status badge
-            status = r.get("status","Active")
-            bg = "#f0fdf4" if status=="Active" else "#fef2f2"
-            fg = "#16a34a" if status=="Active" else "#dc2626"
-            st_w = QWidget(); stl = QHBoxLayout(st_w); stl.setContentsMargins(8,0,4,0)
-            sb = QLabel(f"  {status}  ")
-            sb.setStyleSheet(f"background:{bg};color:{fg};border-radius:5px;font-size:11px;font-weight:700;padding:2px 0;")
-            stl.addWidget(sb); stl.addStretch()
-            self._table.setCellWidget(i, 7, st_w)
+    def load_supplier(self, supplier_code):
+        self.supplier_code = supplier_code
+        supplier = _row(
+            self.db_name, "SELECT * FROM suppliers WHERE code=?", (supplier_code,)
+        )
+        self.title.setText(
+            f"{supplier.get('name','Supplier')}  ·  {supplier_code}"
+        )
+        while self.info_grid.count():
+            item = self.info_grid.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        info = [
+            ("Supplier Code", supplier_code), ("Supplier Name", supplier.get("name")),
+            ("Contact Person", supplier.get("contact_person")),
+            ("Phone", supplier.get("phone")), ("Email", supplier.get("email")),
+            ("GSTIN", supplier.get("gstin")), ("Address", supplier.get("address")),
+            ("City", supplier.get("city")), ("State", supplier.get("state")),
+            ("Payment Terms", f"{supplier.get('payment_terms_days') or 0} days"),
+            ("Credit Limit", _money(supplier.get("credit_limit"))),
+            ("Current Balance", _money(supplier.get("current_balance"))),
+            ("Status", supplier.get("status") or "Active"),
+        ]
+        for index, (label, value) in enumerate(info):
+            row, column = divmod(index, 3)
+            wrap = QWidget(); layout = QVBoxLayout(wrap)
+            layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(2)
+            name = QLabel(label); name.setStyleSheet(
+                f"font-size:10px;font-weight:700;color:{C['text3']};border:none;"
+            )
+            data = QLabel(str(value or "—")); data.setWordWrap(True)
+            data.setStyleSheet(
+                f"font-size:12px;font-weight:600;color:{C['text']};border:none;"
+            )
+            layout.addWidget(name); layout.addWidget(data)
+            self.info_grid.addWidget(wrap, row, column)
 
-        self._count_lbl.setText(
-            f"{len(self._rows)} supplier{'s' if len(self._rows)!=1 else ''}"
-            + (f"  ·  \"{self._search.text().strip()}\"" if self._search.text().strip() else ""))
+        summary = get_supplier_summary(self.db_name, supplier_code)
+        while self.stats_grid.count():
+            item = self.stats_grid.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        stats = [
+            ("Total Purchase Orders", summary["total_purchase_orders"]),
+            ("Total Purchase Value", _money(summary["total_purchase_value"])),
+            ("Total Quantity Purchased", _number(summary["total_quantity_purchased"])),
+            ("Total Products Purchased", summary["total_products_purchased"]),
+            ("Average Purchase Value", _money(summary["average_purchase_value"])),
+            ("Last Purchase Date", summary["last_purchase_date"] or "—"),
+            ("Pending Payment Amount", _money(summary["pending_payment"])),
+        ]
+        for index, (label, value) in enumerate(stats):
+            self.stats_grid.addWidget(
+                _stat_card(label, value, C["accent"] if index == 6 else None),
+                index // 4, index % 4,
+            )
 
-    def _on_double_click(self, item):
-        row = item.row()
-        if 0 <= row < len(self._rows):
-            r = self._rows[row]
-            self._on_view(r["code"], r.get("name",""))
+        self.purchase_rows = get_supplier_purchases(self.db_name, supplier_code)
+        _fill_table(
+            self.purchase_table, self.purchase_rows,
+            ["invoice_number", "purchase_date", "total_products", "total_quantity",
+             "purchase_value", "discount_amount", "tax_amount", "net_amount",
+             "paid_amount", "balance_amount", "payment_status"],
+            currency_columns=(4, 5, 6, 7, 8, 9), status_column=10,
+        )
+        self.inventory_rows = get_supplier_inventory(self.db_name, supplier_code)
+        _fill_table(
+            self.inventory_table, self.inventory_rows,
+            ["product_code", "product_name", "category", "brand", "size", "color",
+             "total_purchased_qty", "sold_qty", "available_stock", "reserved_stock",
+             "last_purchase_date", "last_purchase_price", "average_purchase_price",
+             "selling_price", "current_stock_value", "reorder_level", "stock_status"],
+            currency_columns=(11, 12, 13, 14), status_column=16,
+        )
+        self._load_insights(supplier, summary)
+
+    def _open_invoice(self, row, column):
+        if column == 0 and 0 <= row < len(self.purchase_rows):
+            InvoiceDetailDialog(
+                self.db_name, self.supplier_code,
+                self.purchase_rows[row]["invoice_number"], self
+            ).exec()
+
+    def _open_product(self, row, column):
+        if column in (0, 1) and 0 <= row < len(self.inventory_rows):
+            supplier = _row(
+                self.db_name, "SELECT name FROM suppliers WHERE code=?",
+                (self.supplier_code,)
+            )
+            ProductDetailDialog(
+                supplier.get("name", ""), self.inventory_rows[row], self
+            ).exec()
+
+    def _load_insights(self, supplier, summary):
+        while self.insights_layout.count():
+            item = self.insights_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        inventory = self.inventory_rows
+        fast = sorted(inventory, key=lambda x: x.get("sold_qty", 0), reverse=True)
+        slow = sorted(
+            [x for x in inventory if x.get("sold_qty", 0) > 0],
+            key=lambda x: x.get("sold_qty", 0)
+        )
+        dead = [x for x in inventory
+                if x.get("available_stock", 0) > 0 and x.get("sold_qty", 0) <= 0]
+        low = [x for x in inventory if x.get("stock_status") in
+               ("Low Stock", "Out of Stock")]
+        most_ordered = max(
+            inventory, key=lambda x: x.get("total_purchased_qty", 0), default={}
+        )
+        profit_product = max(
+            inventory,
+            key=lambda x: (
+                float(x.get("selling_price") or 0)
+                - float(x.get("average_purchase_price") or 0)
+            ) * float(x.get("sold_qty") or 0),
+            default={}
+        )
+        cards = QWidget(); grid = QGridLayout(cards)
+        grid.setContentsMargins(0, 0, 0, 0); grid.setSpacing(10)
+        metrics = [
+            ("Most Ordered Product", most_ordered.get("product_name") or "—"),
+            ("Most Profitable Product", profit_product.get("product_name") or "—"),
+            ("Fast Moving Products", len([x for x in fast if x.get("sold_qty", 0)>0])),
+            ("Slow Moving Products", len(slow)),
+            ("Dead Stock Products", len(dead)),
+            ("Low Stock Alerts", len(low)),
+            ("Pending Payment Alert", _money(summary["pending_payment"])),
+            ("Current Supplier Stock Value", _money(summary["current_stock_value"])),
+        ]
+        for index, metric in enumerate(metrics):
+            grid.addWidget(_stat_card(*metric), index // 4, index % 4)
+        self.insights_layout.addWidget(cards)
+
+        alert_table = _table(
+            ["Insight", "Product", "Qty / Value", "Action Required"], stretch=True
+        )
+        alerts = []
+        for row in fast[:5]:
+            if row.get("sold_qty", 0) > 0:
+                alerts.append({
+                    "insight": "Fast Moving", "product": row["product_name"],
+                    "value": _number(row["sold_qty"]), "action": "Maintain stock",
+                })
+        for row in slow[:5]:
+            alerts.append({
+                "insight": "Slow Moving", "product": row["product_name"],
+                "value": _number(row["sold_qty"]), "action": "Review pricing",
+            })
+        for row in dead[:5]:
+            alerts.append({
+                "insight": "Dead Stock", "product": row["product_name"],
+                "value": _number(row["available_stock"]), "action": "Promote / clear",
+            })
+        for row in low[:5]:
+            alerts.append({
+                "insight": row["stock_status"], "product": row["product_name"],
+                "value": _number(row["available_stock"]), "action": "Reorder",
+            })
+        _fill_table(alert_table, alerts, ["insight", "product", "value", "action"])
+        self.insights_layout.addWidget(alert_table)
+
+        trend_card = _card(); trend_layout = QVBoxLayout(trend_card)
+        heading = QLabel("Supplier Purchase Trend  ·  Monthly / Yearly Summary")
+        heading.setStyleSheet(SEC_HDR_SS)
+        trend_layout.addWidget(heading)
+        trend_table = _table(
+            ["Period", "Invoices", "Quantity Purchased", "Purchase Value"], True
+        )
+        periods = defaultdict(lambda: {"invoices": 0, "qty": 0.0, "value": 0.0})
+        years = defaultdict(lambda: {"invoices": 0, "qty": 0.0, "value": 0.0})
+        for purchase in self.purchase_rows:
+            date = str(purchase.get("purchase_date") or "")
+            period = date[:7] if len(date) >= 7 else "Unknown"
+            year = date[:4] if len(date) >= 4 else "Unknown"
+            periods[period]["invoices"] += 1
+            periods[period]["qty"] += float(purchase.get("total_quantity") or 0)
+            periods[period]["value"] += float(purchase.get("net_amount") or 0)
+            years[year]["invoices"] += 1
+            years[year]["qty"] += float(purchase.get("total_quantity") or 0)
+            years[year]["value"] += float(purchase.get("net_amount") or 0)
+        trend_rows = [
+            {"period": f"Month · {period}", **data}
+            for period, data in sorted(periods.items(), reverse=True)
+        ] + [
+            {"period": f"Year · {year}", **data}
+            for year, data in sorted(years.items(), reverse=True)
+        ]
+        _fill_table(
+            trend_table, trend_rows, ["period", "invoices", "qty", "value"],
+            currency_columns=(3,)
+        )
+        trend_table.setMinimumHeight(210)
+        trend_layout.addWidget(trend_table)
+        self.insights_layout.addWidget(trend_card)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SUPPLIER PAGE  (top-level, matches ProductPage pattern)
-# ─────────────────────────────────────────────────────────────────────────────
+class SupplierListWidget(QWidget):
+    add_requested = pyqtSignal()
+    edit_requested = pyqtSignal(str)
+    view_requested = pyqtSignal(str)
+
+    def __init__(self, db_name, company_name="", parent=None):
+        super().__init__(parent)
+        self.db_name = db_name
+        self.rows = []
+        self.setStyleSheet(f"background:{C['bg_light']};")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 20)
+        top = QHBoxLayout()
+        title = QLabel("Supplier Management")
+        title.setStyleSheet(
+            f"font-size:25px;font-weight:700;color:{C['text']};"
+        )
+        subtitle = QLabel("Textile purchases, invoices, stock and supplier performance")
+        subtitle.setStyleSheet(f"font-size:11px;color:{C['text3']};")
+        title_wrap = QVBoxLayout(); title_wrap.addWidget(title); title_wrap.addWidget(subtitle)
+        add = _button("+ Add Supplier", True); add.clicked.connect(self.add_requested)
+        top.addLayout(title_wrap); top.addStretch(); top.addWidget(add)
+        root.addLayout(top)
+
+        search_card = _card(); search_layout = QHBoxLayout(search_card)
+        search_layout.setContentsMargins(14, 10, 14, 10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(
+            "Search supplier name, code, contact person, phone, GSTIN or product name…"
+        )
+        self.search.setFixedHeight(38); self.search.setStyleSheet(FIELD_SS)
+        self.search.textChanged.connect(self.refresh)
+        search_layout.addWidget(QLabel("🔎")); search_layout.addWidget(self.search)
+        root.addWidget(search_card)
+
+        self.performance_wrap = QWidget()
+        self.performance_grid = QGridLayout(self.performance_wrap)
+        self.performance_grid.setContentsMargins(0, 0, 0, 0)
+        self.performance_grid.setSpacing(10)
+        root.addWidget(self.performance_wrap)
+
+        self.table = _table([
+            "Supplier Code", "Supplier Name", "Contact Person", "Phone", "City",
+            "Total Products Purchased", "Total Purchase Value",
+            "Current Available Stock Qty", "Current Stock Value",
+            "Last Purchase Date", "Pending Balance", "Status",
+        ], stretch=False)
+        self.table.cellDoubleClicked.connect(self._view)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._edit_selected)
+        root.addWidget(self.table)
+        self.count = QLabel()
+        self.count.setStyleSheet(f"font-size:11px;color:{C['text3']};")
+        root.addWidget(self.count)
+        self.refresh()
+
+    def refresh(self, *_args):
+        self.rows = get_suppliers(self.db_name, self.search.text())
+        performance_rows = (
+            self.rows if not self.search.text().strip()
+            else get_suppliers(self.db_name, "")
+        )
+        while self.performance_grid.count():
+            item = self.performance_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        top_purchased = max(
+            performance_rows,
+            key=lambda row: row.get("total_quantity_purchased", 0),
+            default={}
+        )
+        highest_value = max(
+            performance_rows,
+            key=lambda row: row.get("total_purchase_value", 0),
+            default={}
+        )
+        most_profitable = max(
+            performance_rows,
+            key=lambda row: row.get("estimated_profit", 0),
+            default={}
+        )
+        pending_alerts = sum(
+            1 for row in performance_rows
+            if float(row.get("pending_payment") or 0) > 0
+        )
+        performance = [
+            ("Top Purchased Supplier", top_purchased.get("name") or "—"),
+            ("Highest Purchase Value Supplier", highest_value.get("name") or "—"),
+            ("Most Profitable Supplier", most_profitable.get("name") or "—"),
+            ("Pending Payment Alerts", pending_alerts),
+        ]
+        for index, metric in enumerate(performance):
+            self.performance_grid.addWidget(_stat_card(*metric), 0, index)
+        _fill_table(
+            self.table, self.rows,
+            ["code", "name", "contact_person", "phone", "city",
+             "total_products_purchased", "total_purchase_value",
+             "current_stock_qty", "current_stock_value",
+             "last_purchase_date", "pending_payment", "status"],
+            currency_columns=(6, 8, 10), status_column=11,
+        )
+        self.count.setText(
+            f"{len(self.rows)} supplier{'s' if len(self.rows) != 1 else ''}"
+        )
+
+    def _view(self, row, _column):
+        if 0 <= row < len(self.rows):
+            self.view_requested.emit(self.rows[row]["code"])
+
+    def _edit_selected(self, _point):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.rows):
+            self.edit_requested.emit(self.rows[row]["code"])
+
+
 class SupplierPage(QWidget):
     def __init__(self, db_name, company_name="", on_back=None,
                  current_user="Admin", parent=None):
         super().__init__(parent)
-        self.db_name      = db_name
+        ensure_global_input_guard()
+        apply_app_icon(self)
+        self.db_name = db_name
         self.current_user = current_user
+        init_product_table(db_name, current_user)
+        init_supplier_tables(db_name)
         self.setStyleSheet(f"background:{C['bg_light']};")
 
-        init_supplier_tables(db_name)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack)
 
-        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+        self.list_page = SupplierListWidget(db_name, company_name)
+        self.detail_page = SupplierDetailWidget(db_name)
+        self.form_page = SupplierFormWidget(db_name, current_user)
+        self.stack.addWidget(self.list_page)
+        self.stack.addWidget(self.detail_page)
+        self.stack.addWidget(self.form_page)
 
-        # ── Stack: list | detail ──────────────────────────────
-        self._stack = QStackedWidget()
+        self.list_page.add_requested.connect(self._add)
+        self.list_page.edit_requested.connect(self._edit)
+        self.list_page.view_requested.connect(self._view)
+        self.detail_page.back_requested.connect(self._show_list)
+        self.detail_page.edit_requested.connect(self._edit)
+        self.form_page.cancelled.connect(self._show_list)
+        self.form_page.saved.connect(self._saved)
 
-        # Supplier list
-        self._list = SupplierListWidget(
-            db_name      = db_name,
-            on_add       = self._open_add,
-            on_edit      = self._open_edit,
-            on_view      = self._open_detail,
-            company_name = company_name,
-            parent       = self,
-        )
-        self._stack.addWidget(self._list)   # idx 0
+    def _show_list(self):
+        self.list_page.refresh()
+        self.stack.setCurrentWidget(self.list_page)
 
-        # Detail (inventory view)
-        self._detail = SupplierDetailWidget(db_name, self)
-        self._detail.back.connect(self._back_to_list)
-        self._stack.addWidget(self._detail) # idx 1
+    def _add(self):
+        self.form_page.load_for_add()
+        self.stack.setCurrentWidget(self.form_page)
 
-        root.addWidget(self._stack)
+    def _edit(self, code):
+        self.form_page.load_for_edit(code)
+        self.stack.setCurrentWidget(self.form_page)
 
-        # ── Slide panel for Add/Edit form ─────────────────────
-        self._panel = _SlidePanel(self)
-        self._form  = None
-        QTimer.singleShot(0, self._build_form_deferred)
+    def _view(self, code):
+        self.detail_page.load_supplier(code)
+        self.stack.setCurrentWidget(self.detail_page)
 
-    def _build_form_deferred(self):
-        self._form = SupplierFormWidget(self.db_name, self.current_user, self._panel)
-        fl = QVBoxLayout(self._panel); fl.setContentsMargins(0,0,0,0); fl.setSpacing(0)
-        fl.addWidget(self._form)
-        self._form.cancel.connect(self._panel.slide_out)
-        self._form.saved.connect(self._on_saved)
+    def _saved(self, code):
+        self.list_page.refresh()
+        self.detail_page.load_supplier(code)
+        self.stack.setCurrentWidget(self.detail_page)
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._panel.resize_to_parent()
-
-    def _open_add(self):
-        if not self._form:
-            QTimer.singleShot(50, self._open_add); return
-        self._form.load_for_add()
-        self._panel.slide_in()
-
-    def _open_edit(self, code):
-        if not self._form:
-            QTimer.singleShot(50, lambda: self._open_edit(code)); return
-        self._form.load_for_edit(code)
-        self._panel.slide_in()
-
-    def _open_detail(self, sup_code, sup_name):
-        self._detail.load(sup_code, sup_name)
-        self._stack.setCurrentIndex(1)
-
-    def _back_to_list(self):
-        self._list._load()
-        self._stack.setCurrentIndex(0)
-
-    def _on_saved(self, code):
-        self._panel.slide_out()
-        self._list._load()
+    def refresh(self):
+        self.list_page.refresh()

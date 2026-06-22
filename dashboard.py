@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui  import QFont, QColor, QPainter, QBrush
 from PyQt5.QtCore import Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve
 from input_behavior_qt5 import ensure_global_input_guard_qt5
+from app_branding_qt5 import apply_app_icon_qt5
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1217,6 +1218,7 @@ class Dashboard(QWidget):
     def __init__(self, db_name: str, username: str = "User"):
         super().__init__()
         ensure_global_input_guard_qt5()
+        apply_app_icon_qt5(self)
         self.db_name  = db_name
         self.username = username
 

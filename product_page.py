@@ -1,11 +1,11 @@
-"""
+﻿"""
 product_page.py  —  Evo Aura  •  Advanced Product Manager
 ==========================================================
 PyQt6  |  SQLite  |  Apple / EvoAura design system
 
-7-tab form: Basic · Pricing · Inventory · Supplier · Compliance · Sales History · Audit
-Supporting tables: batches, stock_adjustments, price_history, suppliers, product_suppliers
-List page: filter bar, expiry badges, MRP/margin columns, inline stock-adjust button
+6-tab form: Basic · Pricing · Inventory · Supplier · Sales History · Audit
+Supporting tables: stock_adjustments, price_history, suppliers, product_suppliers
+List page: filter bar, MRP/margin columns, inline stock-adjust button
 Soft-delete, audit trail, image upload, live margin %, days-of-stock-left
 
 Architecture:
@@ -20,7 +20,7 @@ A semi-transparent scrim dims the list behind it.
 import sys
 import glob
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -42,6 +42,7 @@ from PyQt6.QtCore import (
     QEasingCurve,
 )
 from input_behavior import ensure_global_input_guard
+from app_branding import apply_app_icon
 
 
 class _NoWheelValueFilter(QObject):
@@ -362,6 +363,67 @@ LEGACY_VARIANT_GROUPS = {
     "Boys & Girls": "4 - 18 age",
     "Men & Women": "18+ age",
 }
+SUB_CATEGORY_OPTIONS = {
+    "Shirts": [
+        "Formal Shirt", "Casual Shirt", "Printed Shirt", "Checked Shirt",
+        "Striped Shirt", "Plain Shirt", "Linen Shirt", "Denim Shirt",
+        "Party Wear Shirt", "Full Sleeve Shirt", "Half Sleeve Shirt",
+        "Mandarin Collar Shirt",
+    ],
+    "T-Shirts": [
+        "Round Neck T-Shirt", "V-Neck T-Shirt", "Graphic T-Shirt",
+        "Printed T-Shirt", "Solid T-Shirt", "Oversized T-Shirt",
+        "Athletic T-Shirt",
+    ],
+    "Polo T-Shirts": [
+        "Solid Polo", "Striped Polo", "Printed Polo", "Premium Polo", "Sports Polo",
+    ],
+    "Jeans": [
+        "Slim Fit Jeans", "Regular Fit Jeans", "Skinny Jeans",
+        "Relaxed Fit Jeans", "Stretch Jeans", "Distressed Jeans",
+    ],
+    "Trousers": [
+        "Formal Trousers", "Casual Trousers", "Stretch Trousers",
+        "Pleated Trousers", "Flat Front Trousers",
+    ],
+    "Formal Pants": [
+        "Office Pants", "Business Pants", "Slim Fit Formal Pants",
+        "Regular Fit Formal Pants",
+    ],
+    "Chinos": [
+        "Slim Fit Chinos", "Regular Fit Chinos", "Stretch Chinos", "Casual Chinos",
+    ],
+    "Shorts": [
+        "Casual Shorts", "Denim Shorts", "Cotton Shorts", "Cargo Shorts",
+        "Sports Shorts",
+    ],
+    "Blazers": [
+        "Single Breasted Blazer", "Double Breasted Blazer",
+        "Casual Blazer", "Formal Blazer",
+    ],
+    "Suits": [
+        "2-Piece Suit", "3-Piece Suit", "Wedding Suit", "Business Suit", "Party Suit",
+    ],
+    "Jackets": [
+        "Denim Jacket", "Bomber Jacket", "Leather Jacket", "Casual Jacket",
+        "Winter Jacket",
+    ],
+    "Hoodies": [
+        "Pullover Hoodie", "Zip Hoodie", "Graphic Hoodie", "Oversized Hoodie",
+    ],
+    "Sweatshirts": [
+        "Crew Neck Sweatshirt", "Printed Sweatshirt", "Oversized Sweatshirt",
+        "Fleece Sweatshirt",
+    ],
+    "Kurta": [
+        "Cotton Kurta", "Linen Kurta", "Printed Kurta", "Festive Kurta", "Short Kurta",
+    ],
+    "Innerwear": ["Vest", "Briefs", "Trunks", "Boxer Shorts", "Thermal Wear"],
+    "Accessories": [
+        "Belt", "Wallet", "Cap", "Socks", "Tie", "Bow Tie", "Handkerchief",
+        "Suspenders",
+    ],
+}
 
 # ─────────────────────────────────────────────────────────────
 #  SESSION-LEVEL DB INIT GUARD
@@ -392,7 +454,18 @@ def init_product_table(db_name, current_user="system"):
             category              TEXT DEFAULT '',
             product_group         TEXT DEFAULT '',
             sub_category          TEXT DEFAULT '',
+            sleeve                TEXT DEFAULT '',
             brand                 TEXT DEFAULT '',
+            style_code            TEXT DEFAULT '',
+            fabric_type           TEXT DEFAULT '',
+            size                  TEXT DEFAULT '',
+            color                 TEXT DEFAULT '',
+            fit_type              TEXT DEFAULT '',
+            pattern               TEXT DEFAULT '',
+            collar_type           TEXT DEFAULT '',
+            gender                TEXT DEFAULT '',
+            season                TEXT DEFAULT '',
+            occasion              TEXT DEFAULT '',
             manufacturer          TEXT DEFAULT '',
             country_of_origin     TEXT DEFAULT 'India',
             hsn_code              TEXT DEFAULT '',
@@ -401,8 +474,6 @@ def init_product_table(db_name, current_user="system"):
             unit                  TEXT DEFAULT '',
             pack_size             INTEGER DEFAULT 1,
             meter                 TEXT DEFAULT '',
-            shelf_life_days       INTEGER DEFAULT 0,
-            storage_condition     TEXT DEFAULT 'Room Temp',
             image                 BLOB,
             mrp                   REAL DEFAULT 0,
             purchase_price        REAL DEFAULT 0,
@@ -415,6 +486,7 @@ def init_product_table(db_name, current_user="system"):
             special_price_from    TEXT DEFAULT '',
             special_price_to      TEXT DEFAULT '',
             discount_pct          REAL DEFAULT 0,
+            purchase_gst          TEXT DEFAULT '0%',
             tax_inclusive         INTEGER DEFAULT 0,
             gst_rate              TEXT DEFAULT '0%',
             igst_rate             TEXT DEFAULT '0%',
@@ -426,11 +498,13 @@ def init_product_table(db_name, current_user="system"):
             stock                 INTEGER DEFAULT 0,
             reserved_stock        INTEGER DEFAULT 0,
             damaged_stock         INTEGER DEFAULT 0,
+            returned_stock        INTEGER DEFAULT 0,
             in_transit_stock      INTEGER DEFAULT 0,
             reorder_level         INTEGER DEFAULT 0,
             safety_stock          INTEGER DEFAULT 0,
             reorder_qty           INTEGER DEFAULT 0,
             min_order_qty         INTEGER DEFAULT 1,
+            net_quantity          REAL DEFAULT 0,
             max_stock             INTEGER DEFAULT 0,
             auto_reorder          INTEGER DEFAULT 0,
             allow_neg_stock       INTEGER DEFAULT 0,
@@ -438,18 +512,11 @@ def init_product_table(db_name, current_user="system"):
             warehouse             TEXT DEFAULT '',
             rack_location         TEXT DEFAULT '',
             bin_location          TEXT DEFAULT '',
-            track_batch           INTEGER DEFAULT 0,
-            track_expiry          INTEGER DEFAULT 0,
-            track_mfg             INTEGER DEFAULT 0,
-            track_serial          INTEGER DEFAULT 0,
-            mfg_date              TEXT DEFAULT '',
-            expiry_date           TEXT DEFAULT '',
-            expiry_alert_days     INTEGER DEFAULT 30,
+            last_stock_updated    TEXT DEFAULT '',
             supplier_name         TEXT DEFAULT '',
             supplier_code         TEXT DEFAULT '',
             supplier_phone        TEXT DEFAULT '',
             supplier_email        TEXT DEFAULT '',
-            supplier_gstin        TEXT DEFAULT '',
             lead_time_days        INTEGER DEFAULT 0,
             last_purchase_price   REAL DEFAULT 0,
             weight_kg             REAL DEFAULT 0,
@@ -458,15 +525,6 @@ def init_product_table(db_name, current_user="system"):
             height_cm             REAL DEFAULT 0,
             has_variants          INTEGER DEFAULT 0,
             variant_type          TEXT DEFAULT '',
-            fssai_number          TEXT DEFAULT '',
-            drug_license_no       TEXT DEFAULT '',
-            is_scheduled_drug     INTEGER DEFAULT 0,
-            schedule_type         TEXT DEFAULT '',
-            e_invoice_applicable  INTEGER DEFAULT 0,
-            e_way_bill_applicable INTEGER DEFAULT 0,
-            print_mrp_on_invoice  INTEGER DEFAULT 1,
-            print_hsn_on_invoice  INTEGER DEFAULT 1,
-            label_format          TEXT DEFAULT '40x25',
             total_qty_sold        INTEGER DEFAULT 0,
             total_revenue         REAL DEFAULT 0,
             last_sold_date        TEXT DEFAULT '',
@@ -485,29 +543,12 @@ def init_product_table(db_name, current_user="system"):
     """)
 
     c.execute("""
-        CREATE TABLE IF NOT EXISTS batches (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_code   TEXT NOT NULL,
-            batch_number   TEXT NOT NULL,
-            qty            INTEGER DEFAULT 0,
-            mfg_date       TEXT DEFAULT '',
-            expiry_date    TEXT DEFAULT '',
-            purchase_price REAL DEFAULT 0,
-            supplier_name  TEXT DEFAULT '',
-            received_date  TEXT DEFAULT '',
-            created_by     TEXT DEFAULT '',
-            UNIQUE(product_code, batch_number)
-        )
-    """)
-
-    c.execute("""
         CREATE TABLE IF NOT EXISTS stock_adjustments (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             product_code TEXT NOT NULL,
             adj_type     TEXT NOT NULL,
             qty          INTEGER NOT NULL,
             reason       TEXT DEFAULT '',
-            batch_number TEXT DEFAULT '',
             adj_date     TEXT DEFAULT '',
             created_by   TEXT DEFAULT '',
             note         TEXT DEFAULT ''
@@ -532,18 +573,34 @@ def init_product_table(db_name, current_user="system"):
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             code            TEXT UNIQUE NOT NULL,
             name            TEXT NOT NULL,
-            gstin           TEXT DEFAULT '',
+            contact_person  TEXT DEFAULT '',
             phone           TEXT DEFAULT '',
+            mobile_number   TEXT DEFAULT '',
+            whatsapp_number TEXT DEFAULT '',
             email           TEXT DEFAULT '',
+            gstin           TEXT DEFAULT '',
+            pan_number      TEXT DEFAULT '',
             address         TEXT DEFAULT '',
+            address_line1   TEXT DEFAULT '',
+            address_line2   TEXT DEFAULT '',
             city            TEXT DEFAULT '',
             state           TEXT DEFAULT '',
             pincode         TEXT DEFAULT '',
+            country         TEXT DEFAULT 'India',
             payment_terms   TEXT DEFAULT 'Net 30',
+            payment_terms_days INTEGER DEFAULT 30,
             credit_limit    REAL DEFAULT 0,
             current_balance REAL DEFAULT 0,
             bank_account    TEXT DEFAULT '',
+            account_holder_name TEXT DEFAULT '',
+            bank_name       TEXT DEFAULT '',
+            branch_name     TEXT DEFAULT '',
+            account_number  TEXT DEFAULT '',
             ifsc            TEXT DEFAULT '',
+            upi_id          TEXT DEFAULT '',
+            default_lead_time INTEGER DEFAULT 0,
+            preferred_payment_method TEXT DEFAULT '',
+            notes           TEXT DEFAULT '',
             status          TEXT DEFAULT 'Active',
             created_at      TEXT DEFAULT ''
         )
@@ -555,6 +612,7 @@ def init_product_table(db_name, current_user="system"):
             product_code          TEXT NOT NULL,
             supplier_code         TEXT NOT NULL,
             supplier_product_code TEXT DEFAULT '',
+            supplier_product_name TEXT DEFAULT '',
             unit_price            REAL DEFAULT 0,
             pack_size             INTEGER DEFAULT 1,
             is_primary            INTEGER DEFAULT 0,
@@ -564,6 +622,50 @@ def init_product_table(db_name, current_user="system"):
             last_ordered_date     TEXT DEFAULT '',
             last_received_price   REAL DEFAULT 0,
             UNIQUE(product_code, supplier_code)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_invoice_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_code TEXT NOT NULL,
+            supplier_code TEXT DEFAULT '',
+            supplier_name TEXT DEFAULT '',
+            invoice_number TEXT NOT NULL,
+            invoice_date TEXT DEFAULT '',
+            purchase_date TEXT DEFAULT '',
+            quantity INTEGER DEFAULT 0,
+            purchase_price REAL DEFAULT 0,
+            gst_rate REAL DEFAULT 0,
+            discount_amount REAL DEFAULT 0,
+            gross_amount REAL DEFAULT 0,
+            gst_amount REAL DEFAULT 0,
+            net_amount REAL DEFAULT 0,
+            paid_amount REAL DEFAULT 0,
+            balance_amount REAL DEFAULT 0,
+            payment_status TEXT DEFAULT 'Pending',
+            stock_after INTEGER DEFAULT 0,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            created_by TEXT DEFAULT ''
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS stock_update_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_code TEXT NOT NULL,
+            action_type TEXT DEFAULT '',
+            reference_number TEXT DEFAULT '',
+            supplier_name TEXT DEFAULT '',
+            qty_in INTEGER DEFAULT 0,
+            qty_out INTEGER DEFAULT 0,
+            old_stock INTEGER DEFAULT 0,
+            new_stock INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            updated_by TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT ''
         )
     """)
 
@@ -579,44 +681,26 @@ def init_product_table(db_name, current_user="system"):
         )
     """)
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS product_purchase_log (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_code       TEXT NOT NULL,
-            invoice_no         TEXT NOT NULL,
-            purchase_date      TEXT NOT NULL,
-            stock_qty          INTEGER DEFAULT 0,
-            purchase_price     REAL DEFAULT 0,
-            purchase_gst       TEXT DEFAULT '0%',
-            price_including_gst REAL DEFAULT 0,
-            created_at         TEXT DEFAULT '',
-            created_by         TEXT DEFAULT ''
-        )
-    """)
-
     c.execute("PRAGMA table_info(products)")
     existing = {r[1] for r in c.fetchall()}
     new_cols = [
         ("sku","TEXT DEFAULT ''"), ("alias_names","TEXT DEFAULT ''"),
         ("product_type","TEXT DEFAULT 'Goods'"), ("tax_category","TEXT DEFAULT 'Standard'"),
         ("product_group","TEXT DEFAULT ''"), ("country_of_origin","TEXT DEFAULT 'India'"),
-        ("tags","TEXT DEFAULT ''"), ("shelf_life_days","INTEGER DEFAULT 0"),
-        ("storage_condition","TEXT DEFAULT 'Room Temp'"), ("image","BLOB"),
+        ("tags","TEXT DEFAULT ''"), ("image","BLOB"),
         ("mrp","REAL DEFAULT 0"), ("retail_price","REAL DEFAULT 0"),
         ("dealer_price","REAL DEFAULT 0"), ("special_price","REAL DEFAULT 0"),
         ("special_price_from","TEXT DEFAULT ''"), ("special_price_to","TEXT DEFAULT ''"),
         ("igst_rate","TEXT DEFAULT '0%'"), ("tcs_applicable","INTEGER DEFAULT 0"),
         ("gst_exemption_reason","TEXT DEFAULT ''"), ("reserved_stock","INTEGER DEFAULT 0"),
-        ("damaged_stock","INTEGER DEFAULT 0"), ("in_transit_stock","INTEGER DEFAULT 0"),
+        ("damaged_stock","INTEGER DEFAULT 0"), ("returned_stock","INTEGER DEFAULT 0"),
+        ("in_transit_stock","INTEGER DEFAULT 0"),
         ("safety_stock","INTEGER DEFAULT 0"), ("reorder_qty","INTEGER DEFAULT 0"),
         ("auto_reorder","INTEGER DEFAULT 0"), ("bin_location","TEXT DEFAULT ''"),
-        ("track_serial","INTEGER DEFAULT 0"), ("supplier_phone","TEXT DEFAULT ''"),
-        ("supplier_email","TEXT DEFAULT ''"), ("supplier_gstin","TEXT DEFAULT ''"),
-        ("fssai_number","TEXT DEFAULT ''"), ("drug_license_no","TEXT DEFAULT ''"),
-        ("is_scheduled_drug","INTEGER DEFAULT 0"), ("schedule_type","TEXT DEFAULT ''"),
-        ("e_invoice_applicable","INTEGER DEFAULT 0"), ("e_way_bill_applicable","INTEGER DEFAULT 0"),
-        ("print_mrp_on_invoice","INTEGER DEFAULT 1"), ("print_hsn_on_invoice","INTEGER DEFAULT 1"),
-        ("label_format","TEXT DEFAULT '40x25'"), ("total_qty_sold","INTEGER DEFAULT 0"),
+        ("last_stock_updated","TEXT DEFAULT ''"),
+        ("supplier_phone","TEXT DEFAULT ''"),
+        ("supplier_email","TEXT DEFAULT ''"),
+        ("total_qty_sold","INTEGER DEFAULT 0"),
         ("total_revenue","REAL DEFAULT 0"), ("last_sold_date","TEXT DEFAULT ''"),
         ("return_count","INTEGER DEFAULT 0"), ("sale_count","INTEGER DEFAULT 0"),
         ("is_deleted","INTEGER DEFAULT 0"), ("deleted_at","TEXT DEFAULT ''"),
@@ -624,7 +708,13 @@ def init_product_table(db_name, current_user="system"):
         ("created_by","TEXT DEFAULT ''"), ("updated_at","TEXT DEFAULT ''"),
         ("updated_by","TEXT DEFAULT ''"),
         ("description","TEXT DEFAULT ''"), ("sub_category","TEXT DEFAULT ''"),
-        ("brand","TEXT DEFAULT ''"), ("manufacturer","TEXT DEFAULT ''"),
+        ("sleeve","TEXT DEFAULT ''"), ("net_quantity","REAL DEFAULT 0"),
+        ("brand","TEXT DEFAULT ''"), ("style_code","TEXT DEFAULT ''"),
+        ("fabric_type","TEXT DEFAULT ''"), ("size","TEXT DEFAULT ''"),
+        ("color","TEXT DEFAULT ''"), ("fit_type","TEXT DEFAULT ''"),
+        ("pattern","TEXT DEFAULT ''"), ("collar_type","TEXT DEFAULT ''"),
+        ("gender","TEXT DEFAULT ''"), ("season","TEXT DEFAULT ''"),
+        ("occasion","TEXT DEFAULT ''"), ("manufacturer","TEXT DEFAULT ''"),
         ("hsn_code","TEXT DEFAULT ''"), ("barcode","TEXT DEFAULT ''"),
         ("pack_size","INTEGER DEFAULT 1"), ("purchase_price","REAL DEFAULT 0"),
         ("selling_price","REAL DEFAULT 0"), ("wholesale_price","REAL DEFAULT 0"),
@@ -637,10 +727,7 @@ def init_product_table(db_name, current_user="system"):
         ("opening_stock","INTEGER DEFAULT 0"), ("reorder_level","INTEGER DEFAULT 0"),
         ("min_order_qty","INTEGER DEFAULT 1"), ("max_stock","INTEGER DEFAULT 0"),
         ("warehouse","TEXT DEFAULT ''"), ("rack_location","TEXT DEFAULT ''"),
-        ("track_batch","INTEGER DEFAULT 0"), ("track_expiry","INTEGER DEFAULT 0"),
-        ("track_mfg","INTEGER DEFAULT 0"),
-        ("mfg_date","TEXT DEFAULT ''"), ("expiry_date","TEXT DEFAULT ''"),
-        ("expiry_alert_days","INTEGER DEFAULT 30"), ("is_returnable","INTEGER DEFAULT 1"),
+        ("is_returnable","INTEGER DEFAULT 1"),
         ("allow_neg_stock","INTEGER DEFAULT 0"), ("supplier_name","TEXT DEFAULT ''"),
         ("supplier_code","TEXT DEFAULT ''"), ("lead_time_days","INTEGER DEFAULT 0"),
         ("last_purchase_price","REAL DEFAULT 0"), ("weight_kg","REAL DEFAULT 0"),
@@ -655,6 +742,45 @@ def init_product_table(db_name, current_user="system"):
             except Exception:
                 pass
 
+    c.execute("PRAGMA table_info(suppliers)")
+    supplier_existing = {r[1] for r in c.fetchall()}
+    supplier_cols = [
+        ("contact_person", "TEXT DEFAULT ''"),
+        ("mobile_number", "TEXT DEFAULT ''"),
+        ("whatsapp_number", "TEXT DEFAULT ''"),
+        ("gstin", "TEXT DEFAULT ''"),
+        ("pan_number", "TEXT DEFAULT ''"),
+        ("address_line1", "TEXT DEFAULT ''"),
+        ("address_line2", "TEXT DEFAULT ''"),
+        ("country", "TEXT DEFAULT 'India'"),
+        ("payment_terms_days", "INTEGER DEFAULT 30"),
+        ("account_holder_name", "TEXT DEFAULT ''"),
+        ("bank_name", "TEXT DEFAULT ''"),
+        ("branch_name", "TEXT DEFAULT ''"),
+        ("account_number", "TEXT DEFAULT ''"),
+        ("upi_id", "TEXT DEFAULT ''"),
+        ("default_lead_time", "INTEGER DEFAULT 0"),
+        ("preferred_payment_method", "TEXT DEFAULT ''"),
+        ("notes", "TEXT DEFAULT ''"),
+    ]
+    for col, defn in supplier_cols:
+        if col not in supplier_existing:
+            try:
+                c.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
+
+    c.execute("PRAGMA table_info(product_suppliers)")
+    ps_existing = {r[1] for r in c.fetchall()}
+    if "supplier_product_name" not in ps_existing:
+        try:
+            c.execute(
+                "ALTER TABLE product_suppliers "
+                "ADD COLUMN supplier_product_name TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
     _initialized_dbs.add(db_name)
@@ -668,8 +794,8 @@ def get_all_products(db_name, filters=None):
     c = conn.cursor()
     sql = """
         SELECT item_code, name, category, unit, selling_price, mrp,
-               stock, reorder_level, status, gst_rate,
-               expiry_date, last_sold_date, purchase_price, brand
+               stock, reorder_level, status,
+               last_sold_date, purchase_price, brand
         FROM products WHERE is_deleted=0
     """
     params = []
@@ -724,7 +850,13 @@ def get_supplier_by_name(db_name, name):
         return None
 
 
-def create_supplier(db_name, name, phone="", email="", gstin="", address=""):
+def create_supplier(db_name, name, code="", contact_person="", mobile_number="",
+                    whatsapp_number="", email="", gstin="", pan_number="",
+                    address_line1="", address_line2="", city="", state="",
+                    pincode="", country="India", account_holder_name="",
+                    bank_name="", branch_name="", account_number="", ifsc="",
+                    upi_id="", payment_terms_days=30, credit_limit=0,
+                    default_lead_time=0, preferred_payment_method="", notes=""):
     """Insert new supplier, return its code."""
     import time
     name = name.strip()
@@ -739,17 +871,39 @@ def create_supplier(db_name, name, phone="", email="", gstin="", address=""):
             ).fetchone()
             if row:
                 return row[0]
-            base = "SUP" + str(int(time.time()))[-7:]
+            requested_code = code.strip().upper()
+            base = requested_code or ("SUP" + str(int(time.time()))[-7:])
             code = base
             n = 1
             while conn.execute("SELECT 1 FROM suppliers WHERE code=? LIMIT 1", (code,)).fetchone():
+                if requested_code:
+                    return None
                 code = f"{base}{n}"
                 n += 1
             conn.execute(
-                "INSERT INTO suppliers(code,name,phone,email,gstin,address,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (code, name, phone.strip(), email.strip(),
-                 gstin.strip(), address.strip(), now))
+                """INSERT INTO suppliers(
+                    code, name, contact_person, phone, mobile_number,
+                    whatsapp_number, email, gstin, pan_number, address,
+                    address_line1, address_line2, city, state, pincode, country,
+                    payment_terms, payment_terms_days, credit_limit,
+                    bank_account, account_holder_name, bank_name, branch_name,
+                    account_number, ifsc, upi_id, default_lead_time,
+                    preferred_payment_method, notes, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    code, name, contact_person.strip(), mobile_number.strip(),
+                    mobile_number.strip(), whatsapp_number.strip(), email.strip(),
+                    gstin.strip().upper(), pan_number.strip().upper(),
+                    address_line1.strip(), address_line1.strip(),
+                    address_line2.strip(), city.strip(), state.strip(),
+                    pincode.strip(), country.strip() or "India",
+                    f"Net {int(payment_terms_days)}", int(payment_terms_days),
+                    float(credit_limit), account_number.strip(),
+                    account_holder_name.strip(), bank_name.strip(),
+                    branch_name.strip(), account_number.strip(), ifsc.strip().upper(),
+                    upi_id.strip(), int(default_lead_time),
+                    preferred_payment_method.strip(), notes.strip(), now,
+                ))
             conn.commit()
         return code
     except Exception:
@@ -758,7 +912,8 @@ def create_supplier(db_name, name, phone="", email="", gstin="", address=""):
 
 def save_product_supplier(db_name, product_code, supplier_code,
                           sup_sku="", unit_price=0.0, moq=1,
-                          lead_days=0, is_primary=0, default_qty=1):
+                          lead_days=0, is_primary=0, default_qty=1,
+                          supplier_product_name=""):
     """Upsert product_suppliers row."""
     now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -766,17 +921,20 @@ def save_product_supplier(db_name, product_code, supplier_code,
             conn.execute("""
                 INSERT INTO product_suppliers
                     (product_code, supplier_code, supplier_product_code,
-                     unit_price, moq, lead_time_days, is_primary, pack_size, last_ordered_date)
-                VALUES(?,?,?,?,?,?,?,?,?)
+                     unit_price, moq, lead_time_days, is_primary, pack_size,
+                     last_ordered_date, supplier_product_name)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(product_code, supplier_code) DO UPDATE SET
                     supplier_product_code = excluded.supplier_product_code,
                     unit_price            = excluded.unit_price,
                     moq                   = excluded.moq,
                     lead_time_days        = excluded.lead_time_days,
                     is_primary            = excluded.is_primary,
-                    pack_size             = excluded.pack_size
+                    pack_size             = excluded.pack_size,
+                    supplier_product_name = excluded.supplier_product_name
             """, (product_code, supplier_code, sup_sku, unit_price,
-                  moq, lead_days, is_primary, default_qty, now))
+                  moq, lead_days, is_primary, default_qty, now,
+                  supplier_product_name))
             if is_primary:
                 conn.execute(
                     "UPDATE product_suppliers SET is_primary=0 "
@@ -792,7 +950,7 @@ def get_product_suppliers(db_name, product_code):
     try:
         with sqlite3.connect(db_name) as conn:
             rows = conn.execute("""
-                SELECT ps.*, s.name, s.phone, s.email, s.gstin, s.address
+                SELECT ps.*, s.name, s.phone, s.email, s.address
                 FROM product_suppliers ps
                 JOIN suppliers s ON s.code = ps.supplier_code
                 WHERE ps.product_code = ?
@@ -800,7 +958,7 @@ def get_product_suppliers(db_name, product_code):
             """, (product_code,)).fetchall()
             if not rows: return []
             cur = conn.execute("""
-                SELECT ps.*, s.name, s.phone, s.email, s.gstin, s.address
+                SELECT ps.*, s.name, s.phone, s.email, s.address
                 FROM product_suppliers ps
                 JOIN suppliers s ON s.code = ps.supplier_code
                 WHERE ps.product_code = ?
@@ -810,6 +968,22 @@ def get_product_suppliers(db_name, product_code):
             return [dict(zip(cols, r)) for r in rows]
     except Exception:
         return []
+
+
+def get_saved_sub_categories(db_name, category=""):
+    """Return reusable sub-category names, optionally for one category."""
+    with sqlite3.connect(db_name) as conn:
+        sql = (
+            "SELECT DISTINCT TRIM(sub_category) FROM products "
+            "WHERE TRIM(COALESCE(sub_category, ''))<>'' AND is_deleted=0"
+        )
+        params = []
+        if category.strip():
+            sql += " AND lower(TRIM(category))=lower(?)"
+            params.append(category.strip())
+        sql += " ORDER BY TRIM(sub_category) COLLATE NOCASE"
+        rows = conn.execute(sql, params).fetchall()
+    return [row[0] for row in rows if row and row[0]]
 
 
 def get_next_item_code(db_name):
@@ -857,18 +1031,6 @@ def get_product_full(db_name, item_code):
     return dict(zip(cols, row))
 
 
-def get_batches(db_name, product_code):
-    try:
-        with sqlite3.connect(db_name) as conn:
-            return conn.execute(
-                "SELECT batch_number, qty, mfg_date, expiry_date, purchase_price, supplier_name, received_date "
-                "FROM batches WHERE product_code=? ORDER BY expiry_date",
-                (product_code,)
-            ).fetchall()
-    except Exception:
-        return []
-
-
 def get_price_history(db_name, product_code):
     try:
         with sqlite3.connect(db_name) as conn:
@@ -877,6 +1039,54 @@ def get_price_history(db_name, product_code):
                 "FROM price_history WHERE product_code=? ORDER BY changed_at DESC LIMIT 10",
                 (product_code,)
             ).fetchall()
+    except Exception:
+        return []
+
+
+def get_purchase_price_insights(db_name, product_code):
+    """Return latest and average non-zero purchase prices for a product."""
+    if not product_code:
+        return 0.0, 0.0
+    try:
+        with sqlite3.connect(db_name) as conn:
+            supplier_row = conn.execute(
+                "SELECT COALESCE(NULLIF(last_received_price,0), NULLIF(unit_price,0), 0) "
+                "FROM product_suppliers WHERE product_code=? "
+                "ORDER BY CASE WHEN last_ordered_date='' THEN 1 ELSE 0 END, "
+                "last_ordered_date DESC, id DESC LIMIT 1",
+                (product_code,),
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT purchase_price FROM price_history "
+                "WHERE product_code=? AND purchase_price>0 "
+                "ORDER BY changed_at DESC, id DESC",
+                (product_code,),
+            ).fetchall()
+        values = [float(row[0] or 0) for row in rows if float(row[0] or 0) > 0]
+        supplier_latest = float(supplier_row[0] or 0) if supplier_row else 0.0
+        if not values:
+            return supplier_latest, supplier_latest
+        return supplier_latest or values[0], sum(values) / len(values)
+    except Exception:
+        return 0.0, 0.0
+
+
+def get_saved_product_values(db_name, column):
+    """Return reusable values for approved product dropdown columns."""
+    allowed = {
+        "brand", "fabric_type", "fit_type", "product_group", "category",
+        "color", "pattern", "occasion",
+    }
+    if column not in allowed:
+        return []
+    try:
+        with sqlite3.connect(db_name) as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT TRIM({column}) FROM products "
+                f"WHERE TRIM(COALESCE({column}, ''))<>'' AND is_deleted=0 "
+                f"ORDER BY TRIM({column}) COLLATE NOCASE"
+            ).fetchall()
+        return [row[0] for row in rows]
     except Exception:
         return []
 
@@ -891,6 +1101,51 @@ def get_stock_adjustments(db_name, product_code):
             ).fetchall()
     except Exception:
         return []
+
+
+def get_purchase_invoice_logs(db_name, product_code):
+    with sqlite3.connect(db_name) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM purchase_invoice_logs WHERE product_code=? "
+            "ORDER BY purchase_date DESC, id DESC",
+            (product_code,),
+        ).fetchall()]
+
+
+def get_stock_update_logs(db_name, product_code):
+    with sqlite3.connect(db_name) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM stock_update_logs WHERE product_code=? "
+            "ORDER BY created_at DESC, id DESC",
+            (product_code,),
+        ).fetchall()]
+
+
+def get_supplier_product_stats(db_name, product_code, supplier_code):
+    with sqlite3.connect(db_name) as conn:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(quantity),0), COALESCE(SUM(net_amount),0),
+                      COALESCE(AVG(NULLIF(purchase_price,0)),0),
+                      COALESCE(MAX(purchase_date),''),
+                      COALESCE(MAX(invoice_number),'')
+               FROM purchase_invoice_logs
+               WHERE product_code=? AND supplier_code=?""",
+            (product_code, supplier_code),
+        ).fetchone()
+        total_all = conn.execute(
+            "SELECT COALESCE(SUM(quantity),0) FROM purchase_invoice_logs "
+            "WHERE product_code=?",
+            (product_code,),
+        ).fetchone()[0]
+    qty = int(row[0] or 0)
+    contribution = (qty / float(total_all) * 100) if total_all else 0
+    return {
+        "total_qty": qty, "total_value": float(row[1] or 0),
+        "average_price": float(row[2] or 0), "last_date": row[3] or "",
+        "last_invoice": row[4] or "", "contribution": contribution,
+    }
 
 
 def save_product(db_name, data: dict, current_user="system"):
@@ -997,8 +1252,12 @@ def save_product_variants(db_name, product_code, variant_group, rows):
             (product_code, variant_group)
         ).fetchone()[0]
         conn.execute(
-            "UPDATE products SET stock=? WHERE item_code=?",
-            (int(total or 0), product_code)
+            "UPDATE products SET stock=?, last_stock_updated=? WHERE item_code=?",
+            (
+                int(total or 0),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                product_code,
+            )
         )
     return int(total or 0)
 
@@ -1024,37 +1283,6 @@ def delete_other_variant_mode(db_name, product_code, keep_group):
             )
 
 
-def save_purchase_log(db_name, product_code, invoice_no, purchase_date, qty,
-                      purchase_price, purchase_gst, user="system"):
-    try:
-        gst_pct = float(str(purchase_gst).replace("%", "").strip())
-    except Exception:
-        gst_pct = 0.0
-    price_with_gst = round(float(purchase_price or 0) * (1 + gst_pct / 100), 2)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with sqlite3.connect(db_name) as conn:
-        conn.execute("""
-            INSERT INTO product_purchase_log
-            (product_code, invoice_no, purchase_date, stock_qty, purchase_price,
-             purchase_gst, price_including_gst, created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?)
-        """, (product_code, invoice_no, purchase_date, int(qty or 0),
-              float(purchase_price or 0), purchase_gst, price_with_gst, now, user))
-
-
-def get_purchase_log(db_name, product_code):
-    if not product_code:
-        return []
-    with sqlite3.connect(db_name) as conn:
-        return conn.execute("""
-            SELECT invoice_no, purchase_date, stock_qty, purchase_price,
-                   purchase_gst, price_including_gst
-            FROM product_purchase_log
-            WHERE product_code=?
-            ORDER BY purchase_date DESC, id DESC
-        """, (product_code,)).fetchall()
-
-
 def soft_delete_product(db_name, item_code, current_user="system"):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(db_name) as conn:
@@ -1065,34 +1293,26 @@ def soft_delete_product(db_name, item_code, current_user="system"):
 
 
 def save_stock_adjustment(db_name, product_code, adj_type, qty, reason,
-                          batch="", note="", user="system"):
+                          note="", user="system"):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(db_name) as conn:
         conn.execute("""
             INSERT INTO stock_adjustments
-            (product_code, adj_type, qty, reason, batch_number, adj_date, created_by, note)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (product_code, adj_type, qty, reason, batch, now, user, note))
+            (product_code, adj_type, qty, reason, adj_date, created_by, note)
+            VALUES (?,?,?,?,?,?,?)
+        """, (product_code, adj_type, qty, reason, now, user, note))
         if adj_type == "IN":
-            conn.execute("UPDATE products SET stock=stock+? WHERE item_code=?", (qty, product_code))
+            conn.execute(
+                "UPDATE products SET stock=stock+?, last_stock_updated=? "
+                "WHERE item_code=?",
+                (qty, now, product_code),
+            )
         else:
-            conn.execute("UPDATE products SET stock=MAX(0,stock-?) WHERE item_code=?", (qty, product_code))
-
-
-def save_batch(db_name, product_code, batch_no, qty, mfg, expiry, price, supplier, user="system"):
-    now = datetime.now().strftime("%Y-%m-%d")
-    with sqlite3.connect(db_name) as conn:
-        try:
-            conn.execute("""
-                INSERT INTO batches
-                (product_code, batch_number, qty, mfg_date, expiry_date,
-                 purchase_price, supplier_name, received_date, created_by)
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (product_code, batch_no, qty, mfg, expiry, price, supplier, now, user))
-        except sqlite3.IntegrityError:
-            conn.execute("UPDATE batches SET qty=qty+? WHERE product_code=? AND batch_number=?",
-                         (qty, product_code, batch_no))
-    save_stock_adjustment(db_name, product_code, "IN", qty, f"Batch {batch_no} received", batch_no, user=user)
+            conn.execute(
+                "UPDATE products SET stock=MAX(0,stock-?), last_stock_updated=? "
+                "WHERE item_code=?",
+                (qty, now, product_code),
+            )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1111,6 +1331,8 @@ def _gap(h: int) -> QWidget:
 
 def make_section(title: str, icon: str = "") -> tuple:
     frame = QFrame()
+    frame.setMinimumWidth(0)
+    frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     frame.setStyleSheet(f"""
         QFrame {{
             background:{C['bg_white']};
@@ -1140,10 +1362,13 @@ def make_section(title: str, icon: str = "") -> tuple:
 
     grid = QGridLayout()
     grid.setSpacing(8)
-    grid.setColumnMinimumWidth(0, 140)
-    grid.setColumnMinimumWidth(1, 170)
-    grid.setColumnMinimumWidth(2, 140)
-    grid.setColumnMinimumWidth(3, 170)
+    # Keep forms responsive when the application sidebar is expanded.
+    grid.setColumnMinimumWidth(0, 92)
+    grid.setColumnMinimumWidth(1, 110)
+    grid.setColumnMinimumWidth(2, 92)
+    grid.setColumnMinimumWidth(3, 110)
+    grid.setColumnStretch(1, 1)
+    grid.setColumnStretch(3, 1)
     outer.addLayout(grid)
     return frame, grid
 
@@ -1410,6 +1635,12 @@ def _normalize_field_widget(widget):
 
 def add_field(grid, row, col, label, widget, required=False, hint="", span=1):
     _normalize_field_widget(widget)
+    if (
+        not hint
+        and isinstance(widget, QComboBox)
+        and bool(widget.property("supportsAddNew"))
+    ):
+        hint = "Select from the list or type to add new"
     lbl = QLabel(label)
     lbl.setFont(_F(12))
     lbl.setStyleSheet(LABEL_SS)
@@ -1691,13 +1922,10 @@ class _GBtn(QPushButton):
 # ─────────────────────────────────────────────────────────────
 class StockAdjDialog(QDialog):
     def __init__(self, db_name, product_code, product_name, current_stock, user="Admin",
-                 parent=None, track_batch=False, track_expiry=False, track_mfg=False):
+                 parent=None):
         super().__init__(parent)
         self.db_name = db_name; self.product_code = product_code; self.user = user
         self.product_name = product_name; self.current_stock = current_stock
-        self.track_batch = bool(track_batch)
-        self.track_expiry = bool(track_expiry)
-        self.track_mfg = bool(track_mfg)
         self.setWindowTitle(f"Stock Adjustment — {product_name}")
         self.setMinimumWidth(480)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -1736,7 +1964,7 @@ class StockAdjDialog(QDialog):
         self.adj_type = QComboBox()
         self.adj_type.addItems([
             "IN — Stock Received",
-            "OUT — Damaged / Expired",
+            "OUT — Damaged",
             "OUT — Return to Supplier",
             "OUT — Lost / Theft",
             "IN — Manual Correction",
@@ -1760,65 +1988,6 @@ class StockAdjDialog(QDialog):
         reason_col.addWidget(self.reason)
         row1.addLayout(qty_col); row1.addLayout(reason_col, 2)
         lay.addLayout(row1)
-
-        # ── Batch section (shown only for IN — Stock Received) ──
-        self._batch_frame = QFrame()
-        self._batch_frame.setStyleSheet(
-            f"QFrame{{background:{C['bg_light']};border:1px solid {C['border']};"
-            f"border-radius:10px;}}")
-        bf_lay = QVBoxLayout(self._batch_frame)
-        bf_lay.setContentsMargins(14, 12, 14, 12); bf_lay.setSpacing(10)
-
-        batch_title = QLabel("🏷️  New Batch Details")
-        batch_title.setStyleSheet(
-            f"font-size:12px;font-weight:700;color:{C['section_hdr']};"
-            f"background:transparent;border:none;")
-        bf_lay.addWidget(batch_title)
-
-        batch_note = QLabel(
-            "Existing stock keeps its original batch & expiry. "
-            "New stock will be tracked under this batch separately.")
-        batch_note.setWordWrap(True)
-        batch_note.setStyleSheet(
-            f"font-size:11px;color:{C['text3']};background:transparent;border:none;")
-        bf_lay.addWidget(batch_note)
-
-        b_row1 = QHBoxLayout(); b_row1.setSpacing(12)
-        bn_col = QVBoxLayout(); bn_col.setSpacing(4)
-        bn_col.addWidget(QLabel("Batch Number", styleSheet=LABEL_SS))
-        self.batch = QLineEdit(); self.batch.setPlaceholderText("e.g. B2024-001")
-        self.batch.setFixedHeight(38)
-        self.batch.setEnabled(self.track_batch)
-        if not self.track_batch:
-            self.batch.setPlaceholderText("Enable batch tracking on product to use this")
-        bn_col.addWidget(self.batch)
-        exp_col = QVBoxLayout(); exp_col.setSpacing(4)
-        exp_col.addWidget(QLabel("Expiry Date", styleSheet=LABEL_SS))
-        self.f_exp = QDateEdit(); self.f_exp.setCalendarPopup(True)
-        self.f_exp.setDate(QDate.currentDate().addYears(1))
-        self.f_exp.setDisplayFormat("dd-MM-yyyy"); self.f_exp.setFixedHeight(38)
-        self.f_exp.setEnabled(self.track_expiry)
-        exp_col.addWidget(self.f_exp)
-        b_row1.addLayout(bn_col); b_row1.addLayout(exp_col)
-        bf_lay.addLayout(b_row1)
-
-        b_row2 = QHBoxLayout(); b_row2.setSpacing(12)
-        mfg_col = QVBoxLayout(); mfg_col.setSpacing(4)
-        mfg_col.addWidget(QLabel("Mfg Date", styleSheet=LABEL_SS))
-        self.f_mfg = QDateEdit(); self.f_mfg.setCalendarPopup(True)
-        self.f_mfg.setDate(QDate.currentDate())
-        self.f_mfg.setDisplayFormat("dd-MM-yyyy"); self.f_mfg.setFixedHeight(38)
-        self.f_mfg.setEnabled(self.track_mfg)
-        mfg_col.addWidget(self.f_mfg)
-        pp_col = QVBoxLayout(); pp_col.setSpacing(4)
-        pp_col.addWidget(QLabel("Purchase Price", styleSheet=LABEL_SS))
-        self.f_pp = QDoubleSpinBox(); self.f_pp.setRange(0, 9999999)
-        self.f_pp.setPrefix("₹ "); self.f_pp.setFixedHeight(38)
-        self.f_pp.setStyleSheet(_NO_ARROW)
-        pp_col.addWidget(self.f_pp)
-        b_row2.addLayout(mfg_col); b_row2.addLayout(pp_col)
-        bf_lay.addLayout(b_row2)
-        lay.addWidget(self._batch_frame)
 
         # Notes
         notes_lbl = QLabel("Notes (optional)"); notes_lbl.setStyleSheet(LABEL_SS)
@@ -1852,7 +2021,6 @@ class StockAdjDialog(QDialog):
 
         root.addWidget(body)
 
-        # Wire type change → show/hide batch frame
         self.adj_type.currentTextChanged.connect(self._on_type_changed)
         self._ok_btn.clicked.connect(self._apply)
         cancel.clicked.connect(self.reject)
@@ -1861,9 +2029,6 @@ class StockAdjDialog(QDialog):
 
     def _on_type_changed(self, text):
         is_in_received = text == "IN — Stock Received"
-        self._batch_frame.setVisible(
-            is_in_received and (self.track_batch or self.track_expiry or self.track_mfg)
-        )
         self._ok_btn.setText(
             "✅  Receive Stock" if is_in_received else "✅  Apply Adjustment")
         self.adjustSize()
@@ -1875,109 +2040,243 @@ class StockAdjDialog(QDialog):
         reason   = self.reason.text().strip() or adj_raw
         notes    = self.note.text().strip()
 
-        if adj_raw == "IN — Stock Received":
-            # Save as a proper new batch — does NOT touch existing batches
-            bn = self.batch.text().strip()
-            if self.track_batch and not bn:
-                QMessageBox.warning(self, "Batch Required",
-                    "Please enter a Batch Number for new stock being received.")
-                return
-            if not (self.track_batch or self.track_expiry or self.track_mfg):
-                save_stock_adjustment(
-                    self.db_name, self.product_code, "IN", qty,
-                    reason, "", notes, self.user)
-                QMessageBox.information(self, "Stock Received",
-                    f"âœ…  {qty} units received.",
-                    QMessageBox.StandardButton.Ok)
-                self.accept()
-                return
-            if not bn:
-                bn = f"RCV{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            save_batch(
-                self.db_name, self.product_code, bn, qty,
-                self.f_mfg.date().toString("yyyy-MM-dd") if self.track_mfg else "",
-                self.f_exp.date().toString("yyyy-MM-dd") if self.track_expiry else "",
-                self.f_pp.value(),
-                "",   # supplier (can extend later)
-                self.user
-            )
-            QMessageBox.information(self, "Stock Received",
-                f"✅  {qty} units received under Batch <b>{bn}</b>.<br>"
-                f"Existing stock batches are unchanged.",
-                QMessageBox.StandardButton.Ok)
-        else:
-            save_stock_adjustment(
-                self.db_name, self.product_code, adj_type, qty,
-                reason, "", notes, self.user)
-            QMessageBox.information(self, "Done",
-                f"Stock {'increased' if adj_type == 'IN' else 'reduced'} by {qty} units.")
+        save_stock_adjustment(
+            self.db_name, self.product_code, adj_type, qty,
+            reason, notes, self.user)
+        QMessageBox.information(self, "Done",
+            f"Stock {'increased' if adj_type == 'IN' else 'reduced'} by {qty} units.")
         self.accept()
 
 
-# ─────────────────────────────────────────────────────────────
-#  BATCH ADD DIALOG
-# ─────────────────────────────────────────────────────────────
-class BatchAddDialog(QDialog):
-    def __init__(self, db_name, product_code, user="Admin", parent=None):
+class PurchaseStockDialog(QDialog):
+    """Offline purchase invoice and stock-in entry."""
+    def __init__(self, db_name, product_code, product_name, current_stock,
+                 current_user, parent=None, invoice_record=None):
         super().__init__(parent)
-        self.db_name = db_name; self.product_code = product_code; self.user = user
-        self.setWindowTitle("Add / Receive Batch")
-        self.setFixedSize(460, 360)
-        self.setStyleSheet(f"QDialog{{background:{C['bg_light']};border-radius:12px;}}" + FIELD_SS)
+        self.db_name, self.product_code = db_name, product_code
+        self.current_stock, self.current_user = int(current_stock or 0), current_user
+        self.invoice_record = invoice_record or None
+        self.original_qty = int((invoice_record or {}).get("quantity", 0) or 0)
+        self.setWindowTitle(
+            "Edit Purchase Invoice & Stock"
+            if self.invoice_record else
+            "Adjust / Update Stock & Purchase Invoice"
+        )
+        self.setMinimumWidth(680)
+        root = QVBoxLayout(self); root.setContentsMargins(20, 18, 20, 18)
+        form = QGridLayout(); form.setHorizontalSpacing(12); form.setVerticalSpacing(9)
+        root.addLayout(form)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(12)
+        self.supplier = QComboBox(); self.supplier.setEditable(True)
+        self.supplier.addItems([""] + get_all_supplier_names(db_name))
+        self.invoice = QLineEdit()
+        self.invoice_date = QDateEdit(QDate.currentDate())
+        self.purchase_date = QDateEdit(QDate.currentDate())
+        self.qty = QSpinBox(); self.qty.setRange(1, 9999999)
+        self.price = price_spin()
+        self.gst = QComboBox(); self.gst.addItems(["0%", "5%", "12%", "18%", "28%"])
+        self.discount = price_spin()
+        self.paid = price_spin()
+        self.notes = QTextEdit(); self.notes.setFixedHeight(65)
+        self.total = ro_label("₹ 0.00"); self.balance = ro_label("₹ 0.00")
+        self.status = ro_label("Pending"); self.new_stock = ro_label(str(self.current_stock))
 
-        hdr = QLabel("📦  Add / Receive Batch")
-        hdr.setFont(_F(15, bold=True))
-        hdr.setStyleSheet(f"color:{C['text']};background:transparent;border:none;")
-        lay.addWidget(hdr)
+        if self.invoice_record:
+            self.supplier.setCurrentText(str(self.invoice_record.get("supplier_name", "") or ""))
+            self.invoice.setText(str(self.invoice_record.get("invoice_number", "") or ""))
+            inv_date = QDate.fromString(
+                str(self.invoice_record.get("invoice_date", "") or ""), "yyyy-MM-dd")
+            pur_date = QDate.fromString(
+                str(self.invoice_record.get("purchase_date", "") or ""), "yyyy-MM-dd")
+            self.invoice_date.setDate(inv_date if inv_date.isValid() else QDate.currentDate())
+            self.purchase_date.setDate(pur_date if pur_date.isValid() else QDate.currentDate())
+            self.qty.setValue(max(1, self.original_qty))
+            self.price.setValue(float(self.invoice_record.get("purchase_price", 0) or 0))
+            self.gst.setCurrentText(
+                f"{float(self.invoice_record.get('gst_rate', 0) or 0):g}%")
+            self.discount.setValue(
+                float(self.invoice_record.get("discount_amount", 0) or 0))
+            self.paid.setValue(float(self.invoice_record.get("paid_amount", 0) or 0))
+            self.notes.setPlainText(str(self.invoice_record.get("notes", "") or ""))
 
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"background:{C['border']};border:none;max-height:1px;")
-        lay.addWidget(sep)
+        info = [
+            ("Product Code", ro_label(product_code)), ("Product Name", ro_label(product_name)),
+            ("Current Available Stock", ro_label(str(current_stock))), ("Supplier Name", self.supplier),
+            ("Invoice Number", self.invoice), ("Invoice Date", self.invoice_date),
+            ("Purchase Date", self.purchase_date), ("Quantity Purchased", self.qty),
+            ("Purchase Price", self.price), ("GST Rate", self.gst),
+            ("Discount Amount", self.discount), ("Paid Amount", self.paid),
+            ("Net Purchase Value", self.total), ("Balance Amount", self.balance),
+            ("Payment Status", self.status), ("New Available Stock", self.new_stock),
+        ]
+        for i, (label, widget) in enumerate(info):
+            add_field(form, i // 2, (i % 2) * 2, label, widget)
+        row = (len(info) + 1) // 2
+        form.addWidget(QLabel("Notes", styleSheet=LABEL_SS), row, 0)
+        form.addWidget(self.notes, row, 1, 1, 3)
 
-        grid = QGridLayout(); grid.setSpacing(8)
-        self.f_batch = QLineEdit(); self.f_batch.setPlaceholderText("e.g. B2024-001")
-        self.f_qty   = QSpinBox(); self.f_qty.setRange(1, 999999)
-        self.f_qty.setFixedHeight(38)
-        self.f_qty.setStyleSheet(_NO_ARROW)
-        self.f_mfg   = QDateEdit(); self.f_mfg.setCalendarPopup(True)
-        self.f_mfg.setDate(QDate.currentDate()); self.f_mfg.setDisplayFormat("dd-MM-yyyy")
-        self.f_exp   = QDateEdit(); self.f_exp.setCalendarPopup(True)
-        self.f_exp.setDate(QDate.currentDate().addYears(1)); self.f_exp.setDisplayFormat("dd-MM-yyyy")
-        self.f_price = QDoubleSpinBox(); self.f_price.setRange(0, 999999); self.f_price.setPrefix("₹ ")
-        self.f_price.setFixedHeight(38)
-        self.f_price.setStyleSheet(_NO_ARROW)
-        self.f_sup   = QLineEdit(); self.f_sup.setPlaceholderText("Supplier name")
-
-        add_field(grid, 0, 0, "Batch No",       self.f_batch, required=True)
-        add_field(grid, 0, 2, "Qty Received",   self.f_qty)
-        add_field(grid, 1, 0, "Mfg Date",       self.f_mfg)
-        add_field(grid, 1, 2, "Expiry Date",    self.f_exp)
-        add_field(grid, 2, 0, "Purchase Price", self.f_price)
-        add_field(grid, 2, 2, "Supplier",       self.f_sup)
-        lay.addLayout(grid)
-
-        btn_row = QHBoxLayout(); btn_row.setSpacing(10)
-        ok = _GBtn("💾  Save Batch", "success")
-        ok.setFixedHeight(38); ok.clicked.connect(self._save)
+        buttons = QHBoxLayout(); buttons.addStretch()
         cancel = _GBtn("Cancel", "ghost")
-        cancel.setFixedHeight(38); cancel.clicked.connect(self.reject)
-        btn_row.addWidget(ok); btn_row.addWidget(cancel)
-        lay.addLayout(btn_row)
+        save = _GBtn(
+            "Save Invoice Changes" if self.invoice_record else "Save & Update Stock",
+            "success")
+        cancel.clicked.connect(self.reject); save.clicked.connect(self._save)
+        buttons.addWidget(cancel); buttons.addWidget(save); root.addLayout(buttons)
+        for w in (self.qty, self.price, self.discount, self.paid):
+            w.valueChanged.connect(self._calculate)
+        self.gst.currentTextChanged.connect(self._calculate)
+        self._calculate()
+
+    def _calculate(self):
+        gross = self.qty.value() * self.price.value()
+        rate = float(self.gst.currentText().replace("%", "") or 0)
+        net = max(0.0, gross + gross * rate / 100 - self.discount.value())
+        balance = max(0.0, net - self.paid.value())
+        status = "Paid" if balance <= 0.005 else (
+            "Partial" if self.paid.value() > 0 else "Pending")
+        self.total.setText(f"₹ {net:,.2f}")
+        self.balance.setText(f"₹ {balance:,.2f}")
+        self.status.setText(status)
+        stock_delta = self.qty.value() - self.original_qty
+        self.new_stock.setText(str(max(0, self.current_stock + stock_delta)))
 
     def _save(self):
-        bn = self.f_batch.text().strip()
-        if not bn:
-            QMessageBox.warning(self, "Error", "Batch number is required.")
+        supplier_name = self.supplier.currentText().strip()
+        if not supplier_name or not self.invoice.text().strip() or self.price.value() <= 0:
+            QMessageBox.warning(self, "Required", "Supplier, invoice number and purchase price are required.")
             return
-        save_batch(self.db_name, self.product_code, bn,
-                   self.f_qty.value(),
-                   self.f_mfg.date().toString("yyyy-MM-dd"),
-                   self.f_exp.date().toString("yyyy-MM-dd"),
-                   self.f_price.value(), self.f_sup.text().strip(), self.user)
-        QMessageBox.information(self, "Done", f"Batch {bn} saved and stock updated.")
+        supplier = get_supplier_by_name(self.db_name, supplier_name)
+        supplier_code = supplier["code"] if supplier else create_supplier(self.db_name, supplier_name)
+        gross = self.qty.value() * self.price.value()
+        rate = float(self.gst.currentText().replace("%", "") or 0)
+        gst_amount = gross * rate / 100
+        net = max(0.0, gross + gst_amount - self.discount.value())
+        balance = max(0.0, net - self.paid.value())
+        status = "Paid" if balance <= 0.005 else ("Partial" if self.paid.value() > 0 else "Pending")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stock_delta = self.qty.value() - self.original_qty
+        new_stock = max(0, self.current_stock + stock_delta)
+        with sqlite3.connect(self.db_name) as conn:
+            if self.invoice_record:
+                conn.execute(
+                    """UPDATE purchase_invoice_logs SET
+                       supplier_code=?,supplier_name=?,invoice_number=?,
+                       invoice_date=?,purchase_date=?,quantity=?,purchase_price=?,
+                       gst_rate=?,discount_amount=?,gross_amount=?,gst_amount=?,
+                       net_amount=?,paid_amount=?,balance_amount=?,payment_status=?,
+                       stock_after=?,notes=? WHERE id=?""",
+                    (supplier_code or "", supplier_name, self.invoice.text().strip(),
+                     self.invoice_date.date().toString("yyyy-MM-dd"),
+                     self.purchase_date.date().toString("yyyy-MM-dd"),
+                     self.qty.value(), self.price.value(), rate,
+                     self.discount.value(), gross, gst_amount, net,
+                     self.paid.value(), balance, status, new_stock,
+                     self.notes.toPlainText().strip(), self.invoice_record["id"]))
+            else:
+                conn.execute(
+                    """INSERT INTO purchase_invoice_logs(
+                        product_code,supplier_code,supplier_name,invoice_number,
+                        invoice_date,purchase_date,quantity,purchase_price,gst_rate,
+                        discount_amount,gross_amount,gst_amount,net_amount,paid_amount,
+                        balance_amount,payment_status,stock_after,notes,created_at,created_by
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (self.product_code, supplier_code or "", supplier_name,
+                     self.invoice.text().strip(), self.invoice_date.date().toString("yyyy-MM-dd"),
+                     self.purchase_date.date().toString("yyyy-MM-dd"), self.qty.value(),
+                     self.price.value(), rate, self.discount.value(), gross, gst_amount,
+                     net, self.paid.value(), balance, status, new_stock,
+                     self.notes.toPlainText().strip(), now, self.current_user))
+            conn.execute(
+                """INSERT INTO stock_update_logs(
+                    product_code,action_type,reference_number,supplier_name,qty_in,
+                    qty_out,old_stock,new_stock,reason,updated_by,notes,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (self.product_code,
+                 "Invoice Edited" if self.invoice_record else "Purchase Stock In",
+                 self.invoice.text().strip(), supplier_name,
+                 max(stock_delta, 0), max(-stock_delta, 0),
+                 self.current_stock, new_stock,
+                 "Purchase invoice edited" if self.invoice_record else "Purchase Invoice",
+                 self.current_user,
+                 self.notes.toPlainText().strip(), now))
+            conn.execute(
+                "UPDATE products SET stock=?, purchase_price=?, last_purchase_price=?, "
+                "last_stock_updated=?, updated_at=? WHERE item_code=?",
+                (new_stock, self.price.value(), self.price.value(), now, now, self.product_code))
+            conn.execute(
+                "UPDATE product_suppliers SET unit_price=?, last_received_price=?, "
+                "last_ordered_date=? WHERE product_code=? AND supplier_code=?",
+                (self.price.value(), self.price.value(),
+                 self.purchase_date.date().toString("yyyy-MM-dd"),
+                 self.product_code, supplier_code or ""))
+            conn.execute(
+                """INSERT OR IGNORE INTO product_suppliers(
+                    product_code,supplier_code,unit_price,moq,lead_time_days,
+                    is_primary,pack_size,last_ordered_date,last_received_price
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (self.product_code, supplier_code or "", self.price.value(), 1, 0,
+                 0, 1, self.purchase_date.date().toString("yyyy-MM-dd"),
+                 self.price.value()))
+        self.accept()
+
+
+class ManualStockDialog(QDialog):
+    def __init__(self, db_name, product_code, product_name, current_stock,
+                 current_user, parent=None):
+        super().__init__(parent)
+        self.db_name, self.product_code = db_name, product_code
+        self.current_stock, self.current_user = int(current_stock or 0), current_user
+        self.setWindowTitle("Manual Stock Update"); self.setMinimumWidth(560)
+        root = QVBoxLayout(self); form = QGridLayout(); root.addLayout(form)
+        self.action = QComboBox(); self.action.addItems([
+            "Manual Stock In", "Manual Stock Out", "Damaged Stock",
+            "Return From Customer", "Return To Supplier", "Stock Correction"])
+        self.qty = QSpinBox(); self.qty.setRange(1, 9999999)
+        self.reason = QComboBox(); self.reason.setEditable(True)
+        self.reason.addItems([
+            "Stock Correction", "Damaged Item", "Customer Return", "Supplier Return",
+            "Missing Item", "Found Extra Stock", "Opening Stock Adjustment", "Internal Use"])
+        self.notes = QTextEdit(); self.notes.setFixedHeight(65)
+        self.new_stock = ro_label(str(self.current_stock))
+        fields = [
+            ("Product Code", ro_label(product_code)), ("Product Name", ro_label(product_name)),
+            ("Current Stock", ro_label(str(current_stock))), ("Action Type", self.action),
+            ("Quantity", self.qty), ("Reason", self.reason), ("New Stock", self.new_stock),
+        ]
+        for i, (label, widget) in enumerate(fields):
+            add_field(form, i, 0, label, widget, span=2)
+        form.addWidget(QLabel("Notes", styleSheet=LABEL_SS), len(fields), 0)
+        form.addWidget(self.notes, len(fields), 1, 1, 3)
+        buttons = QHBoxLayout(); buttons.addStretch()
+        cancel = _GBtn("Cancel", "ghost"); save = _GBtn("Update Stock", "success")
+        cancel.clicked.connect(self.reject); save.clicked.connect(self._save)
+        buttons.addWidget(cancel); buttons.addWidget(save); root.addLayout(buttons)
+        self.action.currentTextChanged.connect(self._calculate)
+        self.qty.valueChanged.connect(self._calculate); self._calculate()
+
+    def _calculate(self):
+        inbound = self.action.currentText() in ("Manual Stock In", "Return From Customer")
+        delta = self.qty.value() if inbound else -self.qty.value()
+        self.new_stock.setText(str(max(0, self.current_stock + delta)))
+
+    def _save(self):
+        inbound = self.action.currentText() in ("Manual Stock In", "Return From Customer")
+        qty_in, qty_out = (self.qty.value(), 0) if inbound else (0, self.qty.value())
+        new_stock = max(0, self.current_stock + qty_in - qty_out)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with sqlite3.connect(self.db_name) as conn:
+            conn.execute(
+                """INSERT INTO stock_update_logs(
+                    product_code,action_type,qty_in,qty_out,old_stock,new_stock,
+                    reason,updated_by,notes,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (self.product_code, self.action.currentText(), qty_in, qty_out,
+                 self.current_stock, new_stock, self.reason.currentText().strip(),
+                 self.current_user, self.notes.toPlainText().strip(), now))
+            conn.execute(
+                "UPDATE products SET stock=?, last_stock_updated=?, updated_at=? "
+                "WHERE item_code=?",
+                (new_stock, now, now, self.product_code))
         self.accept()
 
 
@@ -2118,13 +2417,13 @@ class ProductFormWidget(QWidget):
         # ── Tabs ───────────────────────────────────────────
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(TAB_SS)
-        self.tabs.tabBar().setExpanding(True)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(True)
 
         self._build_tab_basic()
         self._build_tab_pricing()
         self._build_tab_inventory()
         self._build_tab_supplier()
-        self._build_tab_compliance()
         self._build_tab_history()
         self._build_tab_audit()
 
@@ -2145,8 +2444,13 @@ class ProductFormWidget(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background:#f5f5f7;")
         wrap = QWidget(); wrap.setStyleSheet("background:#f5f5f7;")
+        wrap.setMinimumWidth(0)
+        wrap.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.tabs.setMinimumWidth(0)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         wl = QVBoxLayout(wrap)
         wl.setContentsMargins(20, 20, 20, 20); wl.setSpacing(0)
         wl.addWidget(self.tabs)
@@ -2168,7 +2472,7 @@ class ProductFormWidget(QWidget):
         page = QWidget(); page.setStyleSheet("background:transparent;")
         lay = QVBoxLayout(page); lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(12)
 
-        sec, g = make_section("Basic Detail", "🔖")
+        sec, g = make_section("Product Identity", "🔖")
 
         # widgets
         self.f_item_code = QLineEdit(); self.f_item_code.setPlaceholderText("Auto-generated product no")
@@ -2180,9 +2484,13 @@ class ProductFormWidget(QWidget):
         self.f_name    = QLineEdit(); self.f_name.setPlaceholderText("Full product name")
         self.f_alias   = QLineEdit(); self.f_alias.setPlaceholderText("Alt names, comma-separated")
         self.f_use_alias_bill = ToggleSwitch("Use this name in billing")
-        self.f_use_alias_bill.setToolTip("When checked, the first alias is used as the product name on invoices")
+        self.f_use_alias_bill.setToolTip("When checked, the first alias is used during billing")
         self.f_prod_type = QComboBox()
         self.f_prod_type.addItems(["Goods", "Service", "Digital", "Composite"])
+        self.f_prod_type.hide()
+        self.f_desc = QTextEdit()
+        self.f_desc.setPlaceholderText("Product description, material details, care notes…")
+        self.f_desc.setFixedHeight(78)
 
         # layout
         r = 0
@@ -2196,20 +2504,24 @@ class ProductFormWidget(QWidget):
         r += 1
         add_field(g, r, 0, "Product Name", self.f_name, required=True, span=2)
         r += 1
-        add_field(g, r, 0, "Alias Names", self.f_alias,
+        add_field(g, r, 0, "Alias Name", self.f_alias,
                   hint="Comma-separated · used in billing search", span=2)
         r += 1
         g.addWidget(self.f_use_alias_bill, r, 1, 1, 3,
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         r += 1
-        add_field(g, r, 0, "Product Type", self.f_prod_type)
+        add_field(g, r, 0, "Product Description", self.f_desc, span=2)
         lay.addWidget(sec)
 
-        # Image
+        # Image + key textile style fields in a balanced two-panel row.
+        media_row = QHBoxLayout()
+        media_row.setContentsMargins(0, 0, 0, 0)
+        media_row.setSpacing(12)
+
         sec_img, g_img = make_section("Product Image", "🖼️")
         img_row = QHBoxLayout()
         self.img_label = QLabel("No Image")
-        self.img_label.setFixedSize(100, 100); self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img_label.setFixedSize(120, 120); self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.img_label.setStyleSheet(
             f"border:2px dashed {C['border']};border-radius:10px;color:{C['text3']};font-size:12px;")
         img_row.addWidget(self.img_label)
@@ -2221,49 +2533,77 @@ class ProductFormWidget(QWidget):
         img_btns.addWidget(btn_up); img_btns.addWidget(btn_rm); img_btns.addStretch()
         img_row.addLayout(img_btns); img_row.addStretch()
         g_img.addLayout(img_row, 0, 0, 1, 4)
-        lay.addWidget(sec_img)
 
-        # Classification
-        sec2, g2 = make_section("Classification & Properties", "🗂️")
-
-        self.f_product_group = QLineEdit()
-        self.f_product_group.setPlaceholderText("e.g. Menswear")
-
-        self.f_category = QComboBox(); self.f_category.setEditable(True)
-        self.f_category.addItems([
-            "",
-            "Shirts", "T-Shirts", "Formal Shirts", "Casual Shirts", "Ethnic Shirts",
-            "Trousers", "Formal Trousers", "Casual Trousers", "Jeans", "Cargos",
-            "Suits & Blazers", "Kurta & Pyjama", "Sherwanis", "Dhoti & Veshti",
-            "Innerwear & Socks", "Sportswear & Track Suits",
-            "Fabric & Cloth Pieces", "Accessories & Belts",
-        ])
-
-        self.f_sub_cat = QLineEdit(); self.f_sub_cat.setPlaceholderText("e.g. Slim Fit")
-        self.f_brand   = QLineEdit(); self.f_brand.setPlaceholderText("e.g. Raymond")
-
-        self.f_manufacturer = QLineEdit()
-        self.f_manufacturer.setPlaceholderText("e.g. Raymond Ltd")
-        self.f_country = QLineEdit(); self.f_country.setText("India"); self.f_country.hide()
-
+        sec_style, g_style = make_section("Additional", "📦")
         self.f_unit = QComboBox(); self.f_unit.setEditable(True)
-        self.f_unit.addItems([
-            "Pcs", "Meter", "Set", "Pair", "Dozen",
-            "Box", "Pack", "Nos", "Roll",
-        ])
-
+        self.f_unit.addItems(["Piece", "Pair", "Set", "Box", "Pack", "Meter"])
         self.f_pack_size = QSpinBox()
         self.f_pack_size.setFixedHeight(38)
         self.f_pack_size.setStyleSheet(_NO_ARROW)
         self.f_pack_size.setRange(1, 99999); self.f_pack_size.setValue(1)
+        self.f_status = QComboBox()
+        self.f_status.addItems(["Active", "Draft", "Inactive", "Discontinued"])
+        add_field(g_style, 0, 0, "Unit", self.f_unit, span=2)
+        add_field(g_style, 1, 0, "Pack Size", self.f_pack_size, span=2)
+        add_field(g_style, 2, 0, "Product Status", self.f_status, span=2)
+
+        sec_img.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sec_style.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        media_row.addWidget(sec_img, 1)
+        media_row.addWidget(sec_style, 1)
+        lay.addLayout(media_row)
+
+        # Classification
+        sec2, g2 = make_section("Product Classification", "🗂️")
+
+        self.f_product_group = QComboBox()
+        self.f_product_group.setEditable(True)
+        self.f_product_group.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.f_product_group.setProperty("supportsAddNew", True)
+        self.f_product_group.addItems([""] + list(dict.fromkeys([
+            "Apparel", "Footwear", "Accessories", "Innerwear",
+            "Seasonal Collection",
+        ] + get_saved_product_values(self.db_name, "product_group"))))
+        self.f_product_group.lineEdit().setPlaceholderText("Select or add product group")
+        _apply_combo_delegate(self.f_product_group)
+
+        self.f_category = QComboBox(); self.f_category.setEditable(True)
+        self.f_category.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.f_category.setProperty("supportsAddNew", True)
+        self.f_category.addItems(list(dict.fromkeys([
+            "",
+            "Shirts", "T-Shirts", "Polo T-Shirts", "Jeans", "Trousers",
+            "Formal Pants", "Chinos", "Shorts", "Blazers", "Suits",
+            "Jackets", "Hoodies", "Sweatshirts", "Kurta", "Innerwear",
+            "Accessories",
+        ] + get_saved_product_values(self.db_name, "category"))))
+        self.f_category.lineEdit().setPlaceholderText("Select or add category")
+        self.f_category.currentTextChanged.connect(self._on_category_changed)
+
+        self.f_sub_cat = QComboBox()
+        self.f_sub_cat.setEditable(True)
+        self.f_sub_cat.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.f_sub_cat.setProperty("supportsAddNew", True)
+        self.f_sub_cat.addItem("")
+        self.f_sub_cat.lineEdit().setPlaceholderText(
+            "Select or enter a new sub-category"
+        )
+        _apply_combo_delegate(self.f_sub_cat)
+        self.f_brand = QComboBox()
+        self.f_brand.setEditable(True)
+        self.f_brand.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.f_brand.setProperty("supportsAddNew", True)
+        self.f_brand.addItems([""] + get_saved_product_values(self.db_name, "brand"))
+        self.f_brand.lineEdit().setPlaceholderText("Select or add brand")
+        _apply_combo_delegate(self.f_brand)
+        self.f_manufacturer = QLineEdit()
+        self.f_manufacturer.setPlaceholderText("e.g. Raymond Ltd")
+        self.f_manufacturer.hide()
+        self.f_country = QLineEdit(); self.f_country.setText("India"); self.f_country.hide()
 
         # hidden stubs so _collect / _save_fields still work
-        self.f_meter      = QLineEdit(); self.f_meter.hide()
-        self.f_shelf_life = QSpinBox();  self.f_shelf_life.hide()
-        self.f_shelf_life.setFixedHeight(38)
-        self.f_shelf_life.setStyleSheet(_NO_ARROW)
-        self.f_storage    = QComboBox(); self.f_storage.hide()
-        self.f_tags       = QLineEdit(); self.f_tags.hide()
+        self.f_meter = QLineEdit(); self.f_meter.hide()
+        self.f_tags  = QLineEdit(); self.f_tags.hide()
 
         r2 = 0
         add_field(g2, r2, 0, "Product Group", self.f_product_group)
@@ -2272,27 +2612,74 @@ class ProductFormWidget(QWidget):
         add_field(g2, r2, 0, "Sub-category",  self.f_sub_cat)
         add_field(g2, r2, 2, "Brand",         self.f_brand)
         r2 += 1
-        add_field(g2, r2, 0, "Manufacturer",  self.f_manufacturer)
-        r2 += 1
-        add_field(g2, r2, 0, "Unit",          self.f_unit,
-                  hint="Use ‘Meter’ for fabric — billing will calculate by length")
-        add_field(g2, r2, 2, "Pack Size",     self.f_pack_size)
         lay.addWidget(sec2)
 
-        # Description (hidden stubs — keep _collect/_save_fields working)
-        self.f_desc  = QTextEdit(); self.f_desc.hide()
-        self.f_notes = QTextEdit(); self.f_notes.hide()
+        # Textile information
+        sec_textile, gt = make_section("Textile Information", "🧵")
+        self.f_style_code = QLineEdit(); self.f_style_code.setPlaceholderText("Style / design code")
 
-        # Status only
-        sec3, g3 = make_section("Status", "📋")
-        self.f_status = QComboBox()
-        self.f_status.addItems(["Active", "Draft", "Inactive", "Discontinued"])
-        add_field(g3, 0, 0, "Status", self.f_status, required=True)
-        lay.addWidget(sec3)
+        def editable_combo(defaults, column=None, placeholder="Select or add"):
+            combo = QComboBox(); combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            combo.setProperty("supportsAddNew", True)
+            saved = get_saved_product_values(self.db_name, column) if column else []
+            combo.addItems([""] + list(dict.fromkeys(defaults + saved)))
+            combo.lineEdit().setPlaceholderText(placeholder)
+            _apply_combo_delegate(combo)
+            return combo
+
+        self.f_fabric = editable_combo(
+            ["Cotton", "Linen", "Polyester", "Cotton Blend", "Denim", "Rayon",
+             "Viscose", "Lycra", "Spandex", "Wool", "Silk", "Satin", "Terry Cotton"],
+            "fabric_type", "Select or add fabric")
+        self.f_size = QComboBox()
+        self.f_size.addItems(["", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "Free Size"])
+        self.f_color = editable_combo(
+            ["Black", "White", "Navy Blue", "Sky Blue", "Grey", "Charcoal Grey",
+             "Brown", "Beige", "Khaki", "Olive Green", "Green", "Maroon", "Red",
+             "Yellow", "Orange", "Pink", "Purple", "Multi Color"],
+            "color", "Select or add color")
+        self.f_fit = editable_combo(
+            ["Slim Fit", "Regular Fit", "Relaxed Fit", "Skinny Fit", "Comfort Fit", "Oversized"],
+            "fit_type", "Select or add fit")
+        self.f_pattern = editable_combo(
+            ["Solid", "Checked", "Striped", "Printed", "Floral", "Self Design",
+             "Textured", "Graphic Print"], "pattern", "Select or add pattern")
+        self.f_sleeve = QComboBox()
+        self.f_sleeve.addItems(["", "Full Sleeve", "Half Sleeve", "Sleeveless", "Roll-Up Sleeve"])
+        self.f_collar = QComboBox()
+        self.f_collar.addItems([
+            "", "Regular Collar", "Mandarin Collar", "Chinese Collar", "Spread Collar",
+            "Polo Neck", "Round Neck", "V Neck", "Turtle Neck", "Henley Neck",
+        ])
+        self.f_gender = QComboBox()
+        self.f_gender.addItems(["", "Men", "Women", "Unisex", "Boys", "Girls"])
+        self.f_season = QComboBox()
+        self.f_season.addItems(["", "Summer", "Winter", "Monsoon", "Spring", "All Season"])
+        self.f_occasion = editable_combo(
+            ["Casual", "Formal", "Party Wear", "Wedding", "Office Wear", "Daily Wear",
+             "Sports Wear", "Ethnic Wear", "Travel"],
+            "occasion", "Select or add occasion")
+
+        textile_fields = [
+            ("Style Code", self.f_style_code), ("Fabric Type", self.f_fabric),
+            ("Size", self.f_size), ("Color", self.f_color),
+            ("Fit Type", self.f_fit), ("Pattern", self.f_pattern),
+            ("Sleeve Type", self.f_sleeve), ("Neck / Collar Type", self.f_collar),
+            ("Gender", self.f_gender), ("Season", self.f_season),
+            ("Occasion", self.f_occasion),
+        ]
+        for index, (label, widget) in enumerate(textile_fields):
+            row, side = divmod(index, 2)
+            add_field(gt, row, side * 2, label, widget)
+        lay.addWidget(sec_textile)
+
+        # Hidden compatibility field.
+        self.f_notes = QTextEdit(); self.f_notes.hide()
         lay.addStretch()
         self.tabs.addTab(page, "BASIC DETAIL")
 
-    # ── TAB 2: PRICING & TAX ──────────────────────────────
+    # ── TAB 2: PRICING ────────────────────────────────────
 
     def _build_tab_pricing(self):
         page = QWidget(); page.setStyleSheet("background:transparent;")
@@ -2306,7 +2693,9 @@ class ProductFormWidget(QWidget):
         lay = QVBoxLayout(left_w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(12)
 
         # Right column — live GST breakdown
-        right_w = QWidget(); right_w.setFixedWidth(320); right_w.setStyleSheet("background:transparent;")
+        right_w = QWidget(); right_w.setStyleSheet("background:transparent;")
+        right_w.setMinimumWidth(240); right_w.setMaximumWidth(320)
+        right_w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         right_lay = QVBoxLayout(right_w); right_lay.setContentsMargins(0, 0, 0, 0); right_lay.setSpacing(12)
 
         cols.addWidget(left_w, 1)
@@ -2318,54 +2707,67 @@ class ProductFormWidget(QWidget):
         self.f_purchase_price = price_spin()
         self.f_purchase_gst   = QComboBox()
         self.f_purchase_gst.addItems(["0%","5%","12%","18%","28%"])
+        self.lbl_purchase_gst_amount = ro_label("₹ 0.00")
         self.lbl_purchase_actual = ro_label("₹ 0.00")
         self.f_selling_price  = price_spin()
+        self.f_retail_price   = price_spin(); self.f_retail_price.hide()
 
         self.f_discount_pct = QDoubleSpinBox()
         self.f_discount_pct.setFixedHeight(38)
         self.f_discount_pct.setStyleSheet(_NO_ARROW)
         self.f_discount_pct.setRange(0, 100); self.f_discount_pct.setDecimals(2)
         self.f_discount_pct.setSuffix(" %")
+        self.f_discount_pct.hide()
         self.f_discount_val = QDoubleSpinBox()
         self.f_discount_val.setFixedHeight(38)
         self.f_discount_val.setStyleSheet(_NO_ARROW)
         self.f_discount_val.setRange(0, 999999); self.f_discount_val.setDecimals(2)
         self.f_discount_val.setPrefix("₹ ")
+        self.f_discount_val.hide()
 
         self.f_margin = QDoubleSpinBox()
         self.f_margin.setRange(-999, 9999); self.f_margin.setDecimals(1)
         self.f_margin.setSuffix(" %"); self.f_margin.setValue(0.0)
         self.f_margin.setFixedHeight(38)
         self.f_margin.setStyleSheet(_NO_ARROW)
+        self.f_margin.setReadOnly(True)
+        self.f_margin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.lbl_margin = self.f_margin   # alias so old refs still work
         self.f_profit = QDoubleSpinBox()
         self.f_profit.setRange(-9999999, 9999999); self.f_profit.setDecimals(2)
         self.f_profit.setPrefix("₹ "); self.f_profit.setValue(0.0)
         self.f_profit.setFixedHeight(38)
         self.f_profit.setStyleSheet(_NO_ARROW)
+        self.f_profit.setReadOnly(True)
+        self.f_profit.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.lbl_profit = self.f_profit   # alias so old setText refs still resolve
 
         # Hidden stubs
         self.f_wholesale_price   = price_spin(); self.f_wholesale_price.hide()
         self.f_dealer_price      = price_spin(); self.f_dealer_price.hide()
-        self.f_min_selling_price = price_spin(); self.f_min_selling_price.hide()
-        self.lbl_markup          = ro_label("—"); self.lbl_markup.hide()
-        self.f_special_price     = price_spin(); self.f_special_price.hide()
-        self.f_retail_price      = price_spin(); self.f_retail_price.hide()
+        self.f_min_selling_price = price_spin()
+        self.lbl_markup          = ro_label("—")
+        self.f_special_price     = price_spin()
+        self.lbl_last_purchase_price = ro_label("—")
+        self.lbl_average_purchase_price = ro_label("—")
         self.f_sp_from = QDateEdit(); self.f_sp_from.hide()
         self.f_sp_to   = QDateEdit(); self.f_sp_to.hide()
 
-        self.f_tax_inclusive = ToggleSwitch("Selling price includes GST  (price already has GST baked in)")
+        self.f_tax_inclusive = ToggleSwitch("Tax Inclusive")
+        self.f_tax_inclusive.setChecked(True)
         # f_tax_inclusive is ToggleSwitch — no stylesheet needed
 
         # GST fields
         self.f_tax_cat = QComboBox()
         self.f_tax_cat.addItems(["Standard", "Nil Rated", "Exempt", "Zero Rated", "Non-GST"])
-        self.f_hsn = QLineEdit(); self.f_hsn.setPlaceholderText("e.g. 2202")
+        self.f_tax_cat.hide()
+        self.f_hsn = QLineEdit(); self.f_hsn.setPlaceholderText("e.g. 6205")
+        self.f_hsn.hide()
         self.f_gst_rate = QComboBox()
         self.f_gst_rate.addItems(["0%","5%","12%","18%","28%"])
-        self.f_igst_rate = QComboBox(); self.f_igst_rate.addItems(["0%","5%","12%","18%","28%"]); self.f_igst_rate.hide()
-        self.f_tax_type  = QComboBox(); self.f_tax_type.addItems(["CGST + SGST (local)","IGST (interstate)"]); self.f_tax_type.hide()
+        self.f_igst_rate = QComboBox(); self.f_igst_rate.addItems(["0%","5%","12%","18%","28%"])
+        self.f_igst_rate.hide()
+        self.f_tax_type  = QComboBox(); self.f_tax_type.addItems(["CGST+SGST", "IGST"])
         self.f_cess_pct  = QDoubleSpinBox(); self.f_cess_pct.hide()
         self.f_cess_pct.setFixedHeight(38)
         self.f_cess_pct.setStyleSheet(_NO_ARROW)
@@ -2377,53 +2779,59 @@ class ProductFormWidget(QWidget):
         # helper: uniform field height
         FIELD_H = 36
         for w in (self.f_mrp, self.f_purchase_price, self.f_selling_price,
-                  self.f_retail_price, self.f_discount_pct, self.f_discount_val,
-                  self.lbl_purchase_actual,
-                  self.f_purchase_gst, self.f_tax_cat, self.f_hsn,
-                  self.f_gst_rate, self.lbl_cgst_rate, self.lbl_sgst_rate):
+                  self.f_min_selling_price, self.f_special_price,
+                  self.f_discount_pct, self.f_discount_val,
+                  self.lbl_purchase_gst_amount, self.lbl_purchase_actual,
+                  self.f_purchase_gst, self.f_tax_cat, self.f_hsn, self.f_gst_rate,
+                  self.f_igst_rate, self.f_tax_type,
+                  self.lbl_cgst_rate, self.lbl_sgst_rate, self.lbl_markup,
+                  self.lbl_last_purchase_price, self.lbl_average_purchase_price):
             w.setFixedHeight(FIELD_H)
 
         # ── LEFT: Price Tiers section ─────────────────────────
-        sec, g = make_section("Price Tiers", "💰")
+        sec, g = make_section("Retail Pricing", "💰")
         g.setHorizontalSpacing(12); g.setVerticalSpacing(10)
         g.setColumnStretch(1, 1); g.setColumnStretch(3, 1)
-        g.setColumnMinimumWidth(0, 160); g.setColumnMinimumWidth(2, 160)
+        g.setColumnMinimumWidth(0, 110); g.setColumnMinimumWidth(2, 110)
 
         r = 0
-        add_field(g, r, 0, "MRP",           self.f_mrp,           required=True)
-        add_field(g, r, 2, "Purchase Price", self.f_purchase_price, required=True)
+        add_field(g, r, 0, "Purchase Price", self.f_purchase_price, required=True)
+        add_field(g, r, 2, "Purchase GST %", self.f_purchase_gst)
         r += 1
-        add_field(g, r, 0, "Purchase GST",  self.f_purchase_gst,  hint="GST paid on purchase")
-        add_field(g, r, 2, "Actual Cost (incl. GST)", self.lbl_purchase_actual, hint="Auto-calculated")
+        add_field(g, r, 0, "Purchase GST Amount", self.lbl_purchase_gst_amount, hint="Auto-calculated")
+        add_field(g, r, 2, "Actual Cost", self.lbl_purchase_actual, hint="Purchase price + purchase GST")
         r += 1
-        add_field(g, r, 0, "Selling Price", self.f_selling_price, required=True)
-        add_field(g, r, 2, "GST Rate (CGST+SGST)", self.f_gst_rate, required=True)
+        add_field(g, r, 0, "MRP", self.f_mrp, required=True)
+        add_field(g, r, 2, "Selling Price", self.f_selling_price, required=True)
         r += 1
-        g.addWidget(self.f_tax_inclusive, r, 0, 1, 4,
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        add_field(g, r, 0, "Minimum Selling Price", self.f_min_selling_price)
+        add_field(g, r, 2, "Offer Price", self.f_special_price, hint="Optional promotional price")
         r += 1
-        add_field(g, r, 0, "Discount %",     self.f_discount_pct, hint="Enter % → selling price updates")
-        add_field(g, r, 2, "Discount Value", self.f_discount_val, hint="Enter ₹ → % updates")
+        add_field(g, r, 0, "Profit Per Piece", self.f_profit, hint="Auto: selling price − actual cost")
+        add_field(g, r, 2, "Margin %", self.f_margin, hint="Auto: profit ÷ selling price")
         r += 1
-        add_field(g, r, 0, "Margin %",  self.f_margin,
-                  hint="Type % → selling price syncs automatically")
-        add_field(g, r, 2, "Profit ₹", self.f_profit, hint="Enter ₹ profit → sell price syncs")
+        add_field(g, r, 0, "Markup %", self.lbl_markup, hint="Auto: profit ÷ actual cost")
+        add_field(g, r, 2, "Last Purchase Price", self.lbl_last_purchase_price, hint="From latest price history")
+        r += 1
+        add_field(g, r, 0, "Average Purchase Price", self.lbl_average_purchase_price,
+                  hint="From purchase price history", span=2)
         lay.addWidget(sec)
 
         # ── LEFT: GST & Tax section ───────────────────────────
         sec3, g3 = make_section("GST & Tax", "🧾")
         g3.setHorizontalSpacing(12); g3.setVerticalSpacing(10)
         g3.setColumnStretch(1, 1); g3.setColumnStretch(3, 1)
-        g3.setColumnMinimumWidth(0, 160); g3.setColumnMinimumWidth(2, 160)
+        g3.setColumnMinimumWidth(0, 110); g3.setColumnMinimumWidth(2, 110)
 
         r3 = 0
-        add_field(g3, r3, 0, "HSN Code", self.f_hsn,
-                  hint="Mandatory for GST", required=True)
-        add_field(g3, r3, 2, "Tax Category", self.f_tax_cat, required=True)
+        add_field(g3, r3, 0, "Tax Type", self.f_tax_type)
+        add_field(g3, r3, 2, "GST Rate", self.f_gst_rate, required=True)
         r3 += 1
-        add_field(g3, r3, 0, "CGST", self.lbl_cgst_rate, hint="Half of GST rate")
-        add_field(g3, r3, 2, "SGST", self.lbl_sgst_rate, hint="Half of GST rate")
+        g3.addWidget(self.f_tax_inclusive, r3, 0, 1, 2,
+                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        add_field(g3, r3, 2, "CGST %", self.lbl_cgst_rate, hint="Half of GST for local sales")
         r3 += 1
+        add_field(g3, r3, 0, "SGST %", self.lbl_sgst_rate, hint="Half of GST for local sales")
         lay.addWidget(sec3)
 
         lay.addStretch()
@@ -2464,14 +2872,15 @@ class ProductFormWidget(QWidget):
             row.addWidget(lbl); row.addStretch(); row.addWidget(val)
             return row, val
 
-        row_sp,  self._gst_lbl_sp   = _gst_row("Selling Price")
+        row_sp,  self._gst_lbl_sp   = _gst_row("Net Selling Price")
         row_gp,  self._gst_lbl_pct  = _gst_row("GST Rate")
-        row_bp,  self._gst_lbl_base = _gst_row("Base Price (excl. GST)")
+        row_bp,  self._gst_lbl_base = _gst_row("Taxable Value")
         row_cg,  self._gst_lbl_cgst = _gst_row("CGST", indent=True)
         row_sg,  self._gst_lbl_sgst = _gst_row("SGST", indent=True)
-        row_ga,  self._gst_lbl_amt  = _gst_row("Total GST")
-        row_cp,  self._gst_lbl_cust = _gst_row("Customer Pays")
-        for row in [row_sp, row_gp, row_bp, row_cg, row_sg, row_ga, row_cp]:
+        row_ig,  self._gst_lbl_igst = _gst_row("IGST", indent=True)
+        row_ga,  self._gst_lbl_amt  = _gst_row("Total GST Amount")
+        row_cp,  self._gst_lbl_cust = _gst_row("Final Selling Price")
+        for row in [row_sp, row_gp, row_bp, row_cg, row_sg, row_ig, row_ga, row_cp]:
             gp_lay.addLayout(row)
 
         # bottom separator + summary message
@@ -2505,10 +2914,11 @@ class ProductFormWidget(QWidget):
             return round(pp * (1 + g / 100), 2)
 
         def _sync_profit_margin(sell, actual_pp):
-            """Update margin spinner + profit spinner. Always uses purchase+GST as cost."""
+            """Auto-calculate profit, retail margin, and cost markup."""
             if actual_pp > 0 and sell > 0:
-                margin = round((sell - actual_pp) / actual_pp * 100, 1)
                 profit = round(sell - actual_pp, 2)
+                margin = round(profit / sell * 100, 1)
+                markup = round(profit / actual_pp * 100, 1)
                 col_m  = C["success"] if margin >= 0 else C["accent"]
                 col_p  = C["success"] if profit >= 0 else C["accent"]
                 self.f_margin.blockSignals(True)
@@ -2516,7 +2926,7 @@ class ProductFormWidget(QWidget):
                 self.f_margin.setStyleSheet(
                     _NO_ARROW + f"QDoubleSpinBox{{color:{col_m};font-weight:700;}}")
                 self.f_margin.blockSignals(False)
-                self.lbl_markup.setText(f"{margin:.1f}%")
+                self.lbl_markup.setText(f"{markup:.1f}%")
                 self.f_profit.blockSignals(True)
                 self.f_profit.setValue(profit)
                 self.f_profit.setStyleSheet(
@@ -2532,10 +2942,15 @@ class ProductFormWidget(QWidget):
                 self.f_profit.setValue(0.0)
                 self.f_profit.setStyleSheet(_NO_ARROW)
                 self.f_profit.blockSignals(False)
+        self._recalculate_pricing = lambda: _sync_profit_margin(
+            self.f_selling_price.value(), _actual_cost()
+        )
 
         def on_purchase_changed():
             """Purchase price or GST changed → update actual cost + profit + margin."""
             actual = _actual_cost()
+            gst_amount = round(actual - self.f_purchase_price.value(), 2)
+            self.lbl_purchase_gst_amount.setText(f"\u20b9 {gst_amount:.2f}")
             self.lbl_purchase_actual.setText(f"\u20b9 {actual:.2f}")
             self.lbl_purchase_actual.setStyleSheet(
                 f"background:{C['bg_light']};border:1px solid {C['border']};"
@@ -2627,7 +3042,6 @@ class ProductFormWidget(QWidget):
 
         self.f_purchase_price.valueChanged.connect(on_purchase_changed)
         self.f_purchase_gst.currentTextChanged.connect(on_purchase_changed)
-        self.f_mrp.valueChanged.connect(on_mrp_changed)
         self.f_selling_price.valueChanged.connect(on_sell_changed)
         self.f_discount_pct.valueChanged.connect(on_disc_pct_changed)
         self.f_discount_val.valueChanged.connect(on_disc_val_changed)
@@ -2658,11 +3072,24 @@ class ProductFormWidget(QWidget):
             self._du = False
             self._update_gst_panel()
 
-        self.f_margin.valueChanged.connect(on_margin_changed)
-        self.f_profit.valueChanged.connect(on_profit_changed)
         self.f_gst_rate.currentTextChanged.connect(self._update_gst_panel)
+        self.f_igst_rate.currentTextChanged.connect(self._update_gst_panel)
+        self.f_tax_type.currentTextChanged.connect(self._update_gst_panel)
+        self.f_tax_cat.currentTextChanged.connect(self._on_tax_category_changed)
         self.f_tax_inclusive.stateChanged.connect(self._update_gst_panel)
         on_purchase_changed()
+        self._update_gst_panel()
+
+    def _on_tax_category_changed(self, category):
+        taxable = category == "Standard"
+        for widget in (
+            self.f_gst_rate, self.f_igst_rate, self.f_tax_type,
+            self.f_tax_inclusive, self.f_hsn,
+        ):
+            widget.setEnabled(taxable)
+        if not taxable:
+            self.f_gst_rate.setCurrentText("0%")
+            self.f_igst_rate.setCurrentText("0%")
         self._update_gst_panel()
 
     def _update_purchase_actual(self):
@@ -2673,6 +3100,7 @@ class ProductFormWidget(QWidget):
         except Exception:
             g = 0.0
         actual = round(pp * (1 + g / 100), 2)
+        self.lbl_purchase_gst_amount.setText(f"\u20b9 {actual - pp:.2f}")
         self.lbl_purchase_actual.setText(f"\u20b9 {actual:.2f}")
         self.lbl_purchase_actual.setStyleSheet(
             f"background:{C['bg_light']};border:1px solid {C['border']};"
@@ -2683,11 +3111,14 @@ class ProductFormWidget(QWidget):
         pass   # logic now inline in on_sell_changed
 
     def _update_margin(self):
-        pass   # logic now in _sync_profit_margin closure
+        if hasattr(self, "_recalculate_pricing"):
+            self._recalculate_pricing()
 
     def _update_gst_panel(self):
         sp        = self.f_selling_price.value()
-        gst_str   = self.f_gst_rate.currentText()
+        interstate = self.f_tax_type.currentText().startswith("IGST")
+        gst_str = self.f_gst_rate.currentText()
+        self.f_igst_rate.setCurrentText(gst_str)
         inclusive = self.f_tax_inclusive.isChecked()
         try:
             gst_pct = float(gst_str.replace("%", "").strip())
@@ -2695,9 +3126,8 @@ class ProductFormWidget(QWidget):
             gst_pct = 0.0
 
         half = gst_pct / 2
-        # Update CGST / SGST rate labels in the form
-        self.lbl_cgst_rate.setText(f"{half:.1f}%")
-        self.lbl_sgst_rate.setText(f"{half:.1f}%")
+        self.lbl_cgst_rate.setText("—" if interstate else f"{half:.1f}%")
+        self.lbl_sgst_rate.setText("—" if interstate else f"{half:.1f}%")
 
         if gst_pct == 0:
             self._gst_panel.setStyleSheet(
@@ -2707,6 +3137,7 @@ class ProductFormWidget(QWidget):
             self._gst_lbl_base.setText(f"₹ {sp:.2f}")
             self._gst_lbl_cgst.setText("₹ 0.00")
             self._gst_lbl_sgst.setText("₹ 0.00")
+            self._gst_lbl_igst.setText("₹ 0.00")
             self._gst_lbl_amt.setText("₹ 0.00")
             self._gst_lbl_cust.setText(f"₹ {sp:.2f}")
             self._gst_msg_lbl.setText("ℹ️  GST rate is 0% — no tax will be added to this product.")
@@ -2717,8 +3148,9 @@ class ProductFormWidget(QWidget):
             # GST is already in the selling price — extract it
             base    = round(sp / (1 + gst_pct / 100), 2)
             gst_amt = round(sp - base, 2)
-            cgst    = round(gst_amt / 2, 2)
-            sgst    = round(gst_amt - cgst, 2)
+            cgst = 0 if interstate else round(gst_amt / 2, 2)
+            sgst = 0 if interstate else round(gst_amt - cgst, 2)
+            igst = gst_amt if interstate else 0
             self._gst_panel.setStyleSheet(
                 "QFrame{background:#F0FDF4;border:1.5px solid #86EFAC;border-radius:10px;}")
             self._gst_lbl_sp.setText(f"₹ {sp:.2f}  (GST included)")
@@ -2726,17 +3158,20 @@ class ProductFormWidget(QWidget):
             self._gst_lbl_base.setText(f"₹ {base:.2f}")
             self._gst_lbl_cgst.setText(f"₹ {cgst:.2f}  ({half:.1f}%)")
             self._gst_lbl_sgst.setText(f"₹ {sgst:.2f}  ({half:.1f}%)")
+            self._gst_lbl_igst.setText(f"₹ {igst:.2f}  ({gst_pct:.1f}%)")
             self._gst_lbl_amt.setText(f"₹ {gst_amt:.2f}")
             self._gst_lbl_cust.setText(f"₹ {sp:.2f}  ✅ (no extra charge)")
             self._gst_msg_lbl.setStyleSheet(f"font-size:11px;color:{C['success']};background:transparent;padding-top:4px;border:none;")
             self._gst_msg_lbl.setText(
                 f"✅  GST included in ₹ {sp:.2f}.  "
-                f"Base ₹ {base:.2f}  +  CGST ₹ {cgst:.2f}  +  SGST ₹ {sgst:.2f}  =  ₹ {sp:.2f}")
+                f"Base ₹ {base:.2f}  +  "
+                f"{'IGST ₹ ' + format(igst, '.2f') if interstate else 'CGST ₹ ' + format(cgst, '.2f') + ' + SGST ₹ ' + format(sgst, '.2f')}  =  ₹ {sp:.2f}")
         else:
             # GST added on top of selling price
             gst_amt   = round(sp * gst_pct / 100, 2)
-            cgst      = round(gst_amt / 2, 2)
-            sgst      = round(gst_amt - cgst, 2)
+            cgst = 0 if interstate else round(gst_amt / 2, 2)
+            sgst = 0 if interstate else round(gst_amt - cgst, 2)
+            igst = gst_amt if interstate else 0
             cust_pays = round(sp + gst_amt, 2)
             self._gst_panel.setStyleSheet(
                 "QFrame{background:#FFF7ED;border:1.5px solid #FDBA74;border-radius:10px;}")
@@ -2745,12 +3180,14 @@ class ProductFormWidget(QWidget):
             self._gst_lbl_base.setText(f"₹ {sp:.2f}")
             self._gst_lbl_cgst.setText(f"₹ {cgst:.2f}  ({half:.1f}%)")
             self._gst_lbl_sgst.setText(f"₹ {sgst:.2f}  ({half:.1f}%)")
+            self._gst_lbl_igst.setText(f"₹ {igst:.2f}  ({gst_pct:.1f}%)")
             self._gst_lbl_amt.setText(f"₹ {gst_amt:.2f}")
             self._gst_lbl_cust.setText(f"₹ {cust_pays:.2f}  ⚠️ (GST added on top)")
             self._gst_msg_lbl.setStyleSheet(f"font-size:11px;color:{C['warning']};background:transparent;padding-top:4px;border:none;")
             self._gst_msg_lbl.setText(
                 f"⚠️  GST added at billing.  "
-                f"₹ {sp:.2f}  +  CGST ₹ {cgst:.2f}  +  SGST ₹ {sgst:.2f}  =  Customer pays ₹ {cust_pays:.2f}")
+                f"₹ {sp:.2f}  +  "
+                f"{'IGST ₹ ' + format(igst, '.2f') if interstate else 'CGST ₹ ' + format(cgst, '.2f') + ' + SGST ₹ ' + format(sgst, '.2f')}  =  Customer pays ₹ {cust_pays:.2f}")
 
     # ── TAB 3: INVENTORY ──────────────────────────────────
 
@@ -2758,7 +3195,7 @@ class ProductFormWidget(QWidget):
         page = QWidget(); page.setStyleSheet("background:transparent;")
         lay = QVBoxLayout(page); lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(12)
 
-        sec, g = make_section("Stock Levels", "📦")
+        sec, g = make_section("Stock Summary", "📦")
         self.f_opening_stock = QSpinBox(); self.f_opening_stock.setRange(0, 9999999)
         self.f_opening_stock.setFixedHeight(38)
         self.f_opening_stock.setStyleSheet(_NO_ARROW)
@@ -2766,76 +3203,87 @@ class ProductFormWidget(QWidget):
         self.f_reorder_level.setFixedHeight(38)
         self.f_reorder_level.setStyleSheet(_NO_ARROW)
         self.f_safety_stock  = QSpinBox(); self.f_safety_stock.setRange(0, 9999999)
+        self.f_safety_stock.hide()
         self.f_safety_stock.setFixedHeight(38)
         self.f_safety_stock.setStyleSheet(_NO_ARROW)
         self.f_reorder_qty   = QSpinBox(); self.f_reorder_qty.setRange(0, 9999999)
         self.f_reorder_qty.setFixedHeight(38)
         self.f_reorder_qty.setStyleSheet(_NO_ARROW)
-        self.f_min_order_qty = QSpinBox(); self.f_min_order_qty.setRange(1, 999999); self.f_min_order_qty.setValue(1)
-        self.f_min_order_qty.setFixedHeight(38)
-        self.f_min_order_qty.setStyleSheet(_NO_ARROW)
+        self.f_net_quantity = QDoubleSpinBox()
+        self.f_net_quantity.hide()
+        self.f_net_quantity.setRange(0, 9999999)
+        self.f_net_quantity.setDecimals(3)
+        self.f_net_quantity.setFixedHeight(38)
+        self.f_net_quantity.setStyleSheet(_NO_ARROW)
         self.f_max_stock     = QSpinBox(); self.f_max_stock.setRange(0, 9999999)
+        self.f_max_stock.hide()
         self.f_max_stock.setFixedHeight(38)
         self.f_max_stock.setStyleSheet(_NO_ARROW)
+        self.f_reserved_stock = QSpinBox(); self.f_reserved_stock.setRange(0, 9999999)
+        self.f_reserved_stock.hide()
+        self.f_damaged_stock = QSpinBox(); self.f_damaged_stock.setRange(0, 9999999)
+        self.f_damaged_stock.setFixedHeight(38); self.f_damaged_stock.setStyleSheet(_NO_ARROW)
+        self.f_returned_stock = QSpinBox(); self.f_returned_stock.setRange(0, 9999999)
+        self.f_returned_stock.setFixedHeight(38); self.f_returned_stock.setStyleSheet(_NO_ARROW)
+        self.f_min_order_qty = QSpinBox(); self.f_min_order_qty.setRange(1, 9999999)
+        self.f_min_order_qty.setFixedHeight(38); self.f_min_order_qty.setStyleSheet(_NO_ARROW)
+        self.lbl_current_stock = ro_label("0")
         self.lbl_available   = ro_label("—")
         self.lbl_stock_val   = ro_label("—")
+        self.lbl_stock_status = ro_label("—")
+        self.lbl_last_stock_updated = ro_label("—")
         self.lbl_days_left   = ro_label("—")
+        self.lbl_days_left.hide()
         self.f_auto_reorder  = ToggleSwitch("Auto-generate PO when stock hits reorder level")
+        self.f_auto_reorder.hide()
         self.f_allow_neg     = ToggleSwitch("Allow negative stock")
         self.f_returnable    = ToggleSwitch("Product is returnable"); self.f_returnable.setChecked(True)
-        self.f_purchase_invoice = QLineEdit()
-        self.f_purchase_invoice.setPlaceholderText("Purchase invoice number")
-        self.f_purchase_date = QDateEdit()
-        self.f_purchase_date.setCalendarPopup(True)
-        self.f_purchase_date.setDisplayFormat("dd-MM-yyyy")
-        self.f_purchase_date.setDate(QDate.currentDate())
-        self.f_purchase_date.lineEdit().setPlaceholderText("Select purchase date")
-        self.f_purchase_date.clear()
-        _normalize_field_widget(self.f_purchase_invoice)
-        _normalize_field_widget(self.f_purchase_date)
         self.f_opening_stock.valueChanged.connect(self._update_stock_calcs)
+        self.f_reorder_level.valueChanged.connect(self._update_stock_calcs)
+        self.f_damaged_stock.valueChanged.connect(self._update_stock_calcs)
+        self.f_returned_stock.valueChanged.connect(self._update_stock_calcs)
+        self.f_purchase_price.valueChanged.connect(self._update_stock_calcs)
 
         r = 0
         add_field(g, r, 0, "Opening Stock",   self.f_opening_stock, required=True)
-        add_field(g, r, 2, "Reorder Level",   self.f_reorder_level, hint="Alert below this")
+        add_field(g, r, 2, "Current Stock", self.lbl_current_stock, hint="Updated through stock movements")
         r += 1
-        add_field(g, r, 0, "Safety Stock",    self.f_safety_stock, hint="Never go below this buffer")
-        add_field(g, r, 2, "Reorder Qty",     self.f_reorder_qty,  hint="Suggested PO quantity")
+        add_field(g, r, 0, "Available Stock", self.lbl_available,
+                  hint="Current stock − reserved − damaged")
+        add_field(g, r, 2, "Damaged Stock", self.f_damaged_stock,
+                  hint="Damaged or defective pieces")
         r += 1
-        add_field(g, r, 0, "Min Order Qty",   self.f_min_order_qty)
-        add_field(g, r, 2, "Max Stock",       self.f_max_stock)
+        add_field(g, r, 0, "Returned Stock", self.f_returned_stock,
+                  hint="Customer returns or exchanges")
+        add_field(g, r, 2, "Stock Value", self.lbl_stock_val,
+                  hint="Current stock × average purchase price")
         r += 1
-        add_field(g, r, 0, "Available Stock", self.lbl_available, hint="Stock − Reserved − Damaged")
-        add_field(g, r, 2, "Stock Value",     self.lbl_stock_val,  hint="Stock x Purchase Price")
-        r += 1
-        add_field(g, r, 0, "Purchase Invoice No", self.f_purchase_invoice, required=True)
-        add_field(g, r, 2, "Date of Purchase", self.f_purchase_date, required=True)
-        r += 1
-        add_field(g, r, 0, "Days of Stock",   self.lbl_days_left,  hint="Based on 30-day avg sales")
-        r += 1
-        g.addWidget(self.f_auto_reorder, r, 0, 1, 4); r += 1
-        g.addWidget(self.f_allow_neg,    r, 0, 1, 2)
-        g.addWidget(self.f_returnable,   r, 2, 1, 2)
+        add_field(g, r, 0, "Stock Status", self.lbl_stock_status,
+                  hint="In Stock / Low Stock / Out of Stock")
+        add_field(g, r, 2, "Last Stock Updated", self.lbl_last_stock_updated,
+                  hint="Updated when stock details change")
         lay.addWidget(sec)
 
-        # Hidden stubs retained for old save/load fields; storage and batch/expiry UI is removed.
+        sec_control, gc = make_section("Inventory Control & Location", "📍")
+        r = 0
+        add_field(gc, r, 0, "Reorder Level", self.f_reorder_level,
+                  hint="Low-stock alert threshold")
+        add_field(gc, r, 2, "Reorder Quantity", self.f_reorder_qty,
+                  hint="Suggested purchase quantity")
+        r += 1
+        add_field(gc, r, 0, "Minimum Order Quantity", self.f_min_order_qty,
+                  hint="Supplier MOQ")
+        self.f_rack = QLineEdit(); self.f_rack.setPlaceholderText("e.g. Rack A-3")
+        add_field(gc, r, 2, "Rack Location", self.f_rack)
+        r += 1
+        gc.addWidget(self.f_allow_neg, r, 0, 1, 2)
+        gc.addWidget(self.f_returnable, r, 2, 1, 2)
+        lay.addWidget(sec_control)
+
+        # Hidden storage compatibility fields.
         self.f_warehouse = QComboBox(); self.f_warehouse.setEditable(True); self.f_warehouse.hide()
-        self.f_warehouse.addItems([""])
-        self.f_rack = QLineEdit(); self.f_rack.hide()
+        self.f_warehouse.addItems(["Main Store"])
         self.f_bin  = QLineEdit(); self.f_bin.hide()
-        self.f_track_batch  = ToggleSwitch("Track batch numbers"); self.f_track_batch.hide()
-        self.f_track_expiry = ToggleSwitch("Track expiry dates"); self.f_track_expiry.hide()
-        self.f_track_mfg    = ToggleSwitch("Track manufacture dates"); self.f_track_mfg.hide()
-        self.f_track_serial = ToggleSwitch("Track serial numbers"); self.f_track_serial.hide()
-        self.f_mfg_date     = QDateEdit(); self.f_mfg_date.hide()
-        self.f_mfg_date.setDate(QDate.currentDate()); self.f_mfg_date.setDisplayFormat("dd-MM-yyyy")
-        self.f_expiry_date  = QDateEdit(); self.f_expiry_date.hide()
-        self.f_expiry_date.setDate(QDate.currentDate().addYears(1)); self.f_expiry_date.setDisplayFormat("dd-MM-yyyy")
-        self.f_expiry_alert = QSpinBox(); self.f_expiry_alert.hide()
-        self.f_expiry_alert.setRange(1, 365); self.f_expiry_alert.setValue(30)
-        self.lbl_shelf_calc = ro_label("—"); self.lbl_shelf_calc.hide()
-        self.batch_frame = QFrame(); self.batch_frame.hide()
-        self.batch_table = mini_table(["Batch No", "Qty", "Mfg Date", "Expiry", "Price", "Supplier"])
 
         self._available_stock_panel = QFrame()
         self._available_stock_panel.setObjectName("availableStockPanel")
@@ -2956,9 +3404,9 @@ class ProductFormWidget(QWidget):
         custom_entry_row.addWidget(self._custom_add_btn)
         custom_lay.addLayout(custom_entry_row)
 
-        self.custom_variant_table = QTableWidget(0, 5)
+        self.custom_variant_table = QTableWidget(0, 4)
         self.custom_variant_table.setHorizontalHeaderLabels(
-            ["Custom Variant", "Available Stock", "Update Stock", "Action", "Barcode"]
+            ["Custom Variant", "Available Stock", "Update Stock", "Action"]
         )
         self.custom_variant_table.verticalHeader().setVisible(False)
         self.custom_variant_table.setSelectionMode(
@@ -2997,9 +3445,9 @@ class ProductFormWidget(QWidget):
         )
         update_lay.addWidget(update_title)
 
-        self.variant_table = QTableWidget(0, 5)
+        self.variant_table = QTableWidget(0, 4)
         self.variant_table.setHorizontalHeaderLabels(
-            ["Size", "Available Stock", "Update Stock", "Action", "Barcode"]
+            ["Size", "Available Stock", "Update Stock", "Action"]
         )
         self.variant_table.verticalHeader().setVisible(False)
         self.variant_table.setAlternatingRowColors(True)
@@ -3030,19 +3478,6 @@ class ProductFormWidget(QWidget):
         self.f_custom_variant.returnPressed.connect(self._add_custom_variant)
         self._toggle_variants(False)
 
-        sec_log, g_log = make_section("Purchase Invoice Log", "🧾")
-        for col in range(4):
-            g_log.setColumnStretch(col, 1)
-        self.purchase_log_table = mini_table(
-            ["Invoice No", "Purchase Date", "Stock Update", "Purchase Price", "GST", "Price incl. GST"],
-            height=190
-        )
-        self.purchase_log_table.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        g_log.addWidget(self.purchase_log_table, 0, 0, 1, 4)
-        lay.addWidget(sec_log)
-
         # Hidden compatibility stubs. Stock is updated directly in the variant table.
         self.adj_frame = QFrame(); self.adj_frame.hide()
         self.adj_table = mini_table(["Type", "Qty", "Reason", "Date", "By"])
@@ -3051,41 +3486,133 @@ class ProductFormWidget(QWidget):
         lay.addStretch()
         self.tabs.addTab(page, "📦  Inventory")
 
-    def _update_tracking_fields(self):
-        if not all(hasattr(self, name) for name in (
-            "f_track_mfg", "f_track_expiry", "f_mfg_date",
-            "f_expiry_date", "f_expiry_alert", "lbl_shelf_calc",
-        )):
+    def _open_purchase_stock_dialog(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        if not self.edit_code:
+            QMessageBox.information(self, "Save Product", "Save the product before adding a purchase invoice.")
             return
-        track_mfg = self.f_track_mfg.isChecked()
-        track_exp = self.f_track_expiry.isChecked()
-        self.f_mfg_date.setEnabled(track_mfg)
-        self.f_expiry_date.setEnabled(track_exp)
-        self.f_expiry_alert.setEnabled(track_exp)
-        self.lbl_shelf_calc.setEnabled(track_mfg and track_exp)
-        if hasattr(self, "batch_frame"):
-            self.batch_frame.setVisible(False)
-        self._calc_shelf()
+        current = int((get_product_full(self.db_name, product_code) or {}).get("stock", 0))
+        dlg = PurchaseStockDialog(
+            self.db_name, product_code, self.f_name.text().strip() or product_code,
+            current, self.current_user, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.prod = get_product_full(self.db_name, product_code) or self.prod
+            self._refresh_supplier_logs()
+            self._update_stock_calcs()
+            self._refresh_supplier_summary()
 
-    def _calc_shelf(self):
-        if not (self.f_track_mfg.isChecked() and self.f_track_expiry.isChecked()):
-            self.lbl_shelf_calc.setText("—")
+    def _open_manual_stock_dialog(self):
+        product_code = self.edit_code or self.f_item_code.text().strip()
+        if not self.edit_code:
+            QMessageBox.information(self, "Save Product", "Save the product before updating stock.")
             return
-        days = self.f_mfg_date.date().daysTo(self.f_expiry_date.date())
-        self.lbl_shelf_calc.setText(f"{days} days" if days > 0 else "—")
+        current = int((get_product_full(self.db_name, product_code) or {}).get("stock", 0))
+        dlg = ManualStockDialog(
+            self.db_name, product_code, self.f_name.text().strip() or product_code,
+            current, self.current_user, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.prod = get_product_full(self.db_name, product_code) or self.prod
+            self._refresh_supplier_logs()
+            self._update_stock_calcs()
+
+    def _refresh_supplier_logs(self):
+        product_code = self.edit_code or ""
+        if not hasattr(self, "supplier_log_table"):
+            return
+        self.supplier_log_table.setRowCount(0)
+        self._supplier_log_rows = []
+        if not product_code:
+            return
+        for record in get_purchase_invoice_logs(self.db_name, product_code):
+            row = self.supplier_log_table.rowCount()
+            self.supplier_log_table.insertRow(row)
+            values = [
+                record.get("created_at", ""), "Purchase Invoice",
+                record.get("invoice_number", ""), record.get("invoice_date", ""),
+                record.get("supplier_name", ""), record.get("quantity", 0), 0,
+                f"₹ {float(record.get('purchase_price', 0) or 0):,.2f}",
+                f"₹ {float(record.get('net_amount', 0) or 0):,.2f}",
+                record.get("stock_after", 0), record.get("payment_status", ""),
+                record.get("notes", ""),
+            ]
+            for col, value in enumerate(values):
+                self.supplier_log_table.setItem(row, col, QTableWidgetItem(str(value)))
+            self._supplier_log_rows.append(("invoice", record))
+        for record in get_stock_update_logs(self.db_name, product_code):
+            if record.get("action_type") == "Purchase Stock In":
+                continue
+            row = self.supplier_log_table.rowCount()
+            self.supplier_log_table.insertRow(row)
+            values = [
+                record.get("created_at", ""), record.get("action_type", ""),
+                record.get("reference_number", ""), "", record.get("supplier_name", ""),
+                record.get("qty_in", 0), record.get("qty_out", 0), "—", "—",
+                record.get("new_stock", 0), "—",
+                " | ".join(filter(None, [record.get("reason", ""), record.get("notes", "")])),
+            ]
+            for col, value in enumerate(values):
+                self.supplier_log_table.setItem(row, col, QTableWidgetItem(str(value)))
+            self._supplier_log_rows.append(("stock", record))
 
     def _update_stock_calcs(self):
-        if (
-            hasattr(self, "f_has_variants")
-            and (
-                self.f_has_variants.isChecked()
-                or self.f_has_color_variants.isChecked()
-                or self.f_has_custom_variants.isChecked()
-            )
-        ):
-            return
-        s = self.f_opening_stock.value()
-        self.lbl_available.setText(str(s))
+        current = int(
+            self.prod.get("stock", self.f_opening_stock.value())
+            if self.edit_code else self.f_opening_stock.value()
+        )
+        reserved = self.f_reserved_stock.value()
+        damaged = self.f_damaged_stock.value()
+        available = max(0, current - reserved - damaged)
+        reorder = self.f_reorder_level.value()
+
+        self.lbl_current_stock.setText(str(current))
+        self.lbl_available.setText(str(available))
+
+        _last, average = get_purchase_price_insights(
+            self.db_name, self.edit_code or ""
+        )
+        cost = average or self.f_purchase_price.value()
+        self.lbl_stock_val.setText(
+            f"₹ {current * cost:,.2f}" if cost > 0 else "₹ 0.00"
+        )
+
+        if current <= 0:
+            status, color = "Out of Stock", C["accent"]
+        elif reorder > 0 and available <= reorder:
+            status, color = "Low Stock", C["warning"]
+        else:
+            status, color = "In Stock", C["success"]
+        self.lbl_stock_status.setText(status)
+        self.lbl_stock_status.setStyleSheet(
+            f"background:{C['bg_light']};border:1px solid {C['border']};"
+            f"border-radius:8px;padding:6px 10px;font-size:13px;"
+            f"font-weight:700;color:{color};min-height:34px;"
+        )
+        saved_at = str(
+            self.prod.get("last_stock_updated")
+            or self.prod.get("updated_at")
+            or ""
+        )
+        self.lbl_last_stock_updated.setText(
+            saved_at or ("Will be set on save" if not self.edit_code else "—")
+        )
+
+    def _stock_update_timestamp(self):
+        """Keep the prior timestamp unless a stock-related value changed."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.edit_code:
+            return now
+        changed = any([
+            int(self.prod.get("opening_stock") or 0) != self.f_opening_stock.value(),
+            int(self.prod.get("reserved_stock") or 0) != self.f_reserved_stock.value(),
+            int(self.prod.get("damaged_stock") or 0) != self.f_damaged_stock.value(),
+            int(self.prod.get("returned_stock") or 0) != self.f_returned_stock.value(),
+            bool(getattr(self, "_variant_pending", {})),
+        ])
+        return now if changed else str(
+            self.prod.get("last_stock_updated")
+            or self.prod.get("updated_at")
+            or now
+        )
 
     def _build_color_accordion(self):
         for category, colors in COLOR_GROUPS.items():
@@ -3107,9 +3634,9 @@ class ProductFormWidget(QWidget):
                 f"QToolButton:checked{{color:{C['accent_dark']};border-color:{C['accent']};"
                 f"background:{C['accent_tint2']};}}"
             )
-            table = QTableWidget(0, 5)
+            table = QTableWidget(0, 4)
             table.setHorizontalHeaderLabels(
-                ["Color", "Available Stock", "Update Stock", "Action", "Barcode"]
+                ["Color", "Available Stock", "Update Stock", "Action"]
             )
             table.verticalHeader().setVisible(False)
             table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -3344,13 +3871,6 @@ class ProductFormWidget(QWidget):
             )
             table.setCellWidget(row, 3, action)
 
-            barcode = _GBtn("Print Label", "blue")
-            barcode.setFixedHeight(46)
-            barcode.clicked.connect(
-                lambda _checked=False, n=name: self._print_custom_barcode(n)
-            )
-            table.setCellWidget(row, 4, barcode)
-
         table.horizontalHeader().setFixedHeight(48)
         table.setFixedHeight(48 + len(self._custom_values) * 68 + 4)
         self._refresh_custom_summary(saved)
@@ -3408,11 +3928,6 @@ class ProductFormWidget(QWidget):
             )
             for name in self._custom_values
         ]
-
-    def _print_custom_barcode(self, name):
-        QMessageBox.information(
-            self, "Barcode", f"Barcode label for {name} will be added later."
-        )
 
     def _refresh_custom_summary(self, saved=None):
         if not hasattr(self, "_variant_summary_grid"):
@@ -3505,13 +4020,6 @@ class ProductFormWidget(QWidget):
                 )
                 table.setCellWidget(row, 3, action)
 
-                barcode = _GBtn("Print Label", "blue")
-                barcode.setFixedHeight(46)
-                barcode.clicked.connect(
-                    lambda _checked=False, c=color: self._print_color_barcode(c)
-                )
-                table.setCellWidget(row, 4, barcode)
-
             table.horizontalHeader().setFixedHeight(48)
             table.setFixedHeight(48 + len(colors) * 68 + 4)
         self._refresh_color_summary(saved)
@@ -3575,11 +4083,6 @@ class ProductFormWidget(QWidget):
                 if qty > 0:
                     rows.append((COLOR_STORAGE_GROUP, color, qty, ""))
         return rows
-
-    def _print_color_barcode(self, color):
-        QMessageBox.information(
-            self, "Barcode", f"Barcode label for {color} will be added later."
-        )
 
     def _refresh_color_summary(self, saved=None):
         if not hasattr(self, "_variant_summary_grid"):
@@ -3694,11 +4197,6 @@ class ProductFormWidget(QWidget):
                 lambda _checked=False, g=group, s=size, r=row: self._toggle_variant_row(g, s, r)
             )
             self.variant_table.setCellWidget(row, 3, action)
-
-            btn = _GBtn("Print Label", "blue")
-            btn.setFixedHeight(46)
-            btn.clicked.connect(lambda _checked=False, s=size: self._print_variant_barcode(s))
-            self.variant_table.setCellWidget(row, 4, btn)
 
         header_h = 48
         row_h = 68
@@ -3821,10 +4319,10 @@ class ProductFormWidget(QWidget):
         self.f_opening_stock.blockSignals(True)
         self.f_opening_stock.setValue(pending_total)
         self.f_opening_stock.blockSignals(False)
+        self.lbl_current_stock.setText(str(
+            available_total if self.edit_code else pending_total
+        ))
         self.lbl_available.setText(str(available_total))
-
-    def _print_variant_barcode(self, size):
-        QMessageBox.information(self, "Barcode", f"Barcode label for size {size} will be added later.")
 
     def _variant_saved_total(self):
         product_code = self.edit_code or self.f_item_code.text().strip()
@@ -3856,13 +4354,6 @@ class ProductFormWidget(QWidget):
             if item_group == group
         )
 
-    def _purchase_price_including_gst(self):
-        try:
-            gst = float(self.f_purchase_gst.currentText().replace("%", "").strip())
-        except Exception:
-            gst = 0.0
-        return round(self.f_purchase_price.value() * (1 + gst / 100), 2)
-
     def _stock_update_qty(self):
         if (
             self.f_has_variants.isChecked()
@@ -3872,49 +4363,6 @@ class ProductFormWidget(QWidget):
             return self._variant_pending_total()
         return self.f_opening_stock.value() if not self.edit_code else 0
 
-    def _save_purchase_entry(self, product_code, qty):
-        if qty <= 0:
-            return
-        save_purchase_log(
-            self.db_name,
-            product_code,
-            self.f_purchase_invoice.text().strip(),
-            self.f_purchase_date.date().toString("yyyy-MM-dd"),
-            qty,
-            self.f_purchase_price.value(),
-            self.f_purchase_gst.currentText(),
-            self.current_user,
-        )
-        self.f_purchase_invoice.clear()
-        self.f_purchase_date.setDate(QDate.currentDate())
-        self.f_purchase_date.clear()
-        self._load_purchase_log(product_code)
-
-    def _load_purchase_log(self, product_code=None):
-        code = product_code or self.edit_code or self.f_item_code.text().strip()
-        rows = get_purchase_log(self.db_name, code)
-        self.purchase_log_table.setRowCount(0)
-        for invoice, purchase_date, qty, price, gst, price_with_gst in rows:
-            row = self.purchase_log_table.rowCount()
-            self.purchase_log_table.insertRow(row)
-            values = [
-                invoice, purchase_date, qty,
-                f"₹{float(price or 0):,.2f}", gst,
-                f"₹{float(price_with_gst or 0):,.2f}",
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value or ""))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.purchase_log_table.setItem(row, col, item)
-
-    def _add_batch(self):
-        if not self.edit_code:
-            QMessageBox.information(self, "Info", "Save the product first before adding batches.")
-            return
-        dlg = BatchAddDialog(self.db_name, self.edit_code, self.current_user, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._load_batches()
-
     def _do_adj(self):
         if not self.edit_code:
             QMessageBox.information(self, "Info", "Save the product first.")
@@ -3922,34 +4370,9 @@ class ProductFormWidget(QWidget):
         p = get_product_full(self.db_name, self.edit_code)
         dlg = StockAdjDialog(self.db_name, self.edit_code,
                              self.f_name.text() or self.edit_code,
-                             p.get("stock", 0) if p else 0, self.current_user, self,
-                             track_batch=False,
-                             track_expiry=False,
-                             track_mfg=False)
+                             p.get("stock", 0) if p else 0, self.current_user, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._load_adj()
-
-    def _load_batches(self):
-        rows = get_batches(self.db_name, self.edit_code)
-        self.batch_table.setRowCount(0)
-        today = date.today()
-        for bn, qty, mfg, exp, price, sup, rec in rows:
-            r = self.batch_table.rowCount(); self.batch_table.insertRow(r)
-            for col, val in enumerate([bn, qty, mfg, exp, f"₹{price:.2f}", sup or ""]):
-                item = QTableWidgetItem(str(val or ""))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if col == 3 and exp:
-                    try:
-                        diff = (datetime.strptime(exp, "%Y-%m-%d").date() - today).days
-                        if diff < 0:
-                            item.setBackground(QBrush(QColor(C["danger_tint"])))
-                            item.setForeground(QBrush(QColor(C["accent"])))
-                        elif diff <= 30:
-                            item.setBackground(QBrush(QColor(C["warning_tint"])))
-                            item.setForeground(QBrush(QColor(C["warning"])))
-                    except Exception:
-                        pass
-                self.batch_table.setItem(r, col, item)
 
     def _load_adj(self):
         rows = get_stock_adjustments(self.db_name, self.edit_code)
@@ -3990,6 +4413,18 @@ class ProductFormWidget(QWidget):
 
         add_field(g_top, 0, 0, "Supplier Name *", self.f_supplier_name, span=2)
         g_top.addWidget(self._sup_status_lbl, 1, 1, 1, 3)
+        self.lbl_supplier_master_code = ro_label("—")
+        self.lbl_supplier_contact = ro_label("—")
+        self.lbl_supplier_phone = ro_label("—")
+        self.lbl_supplier_email = ro_label("—")
+        self.lbl_supplier_gstin = ro_label("—")
+        self.lbl_supplier_address = ro_label("—")
+        add_field(g_top, 2, 0, "Supplier Code", self.lbl_supplier_master_code)
+        add_field(g_top, 2, 2, "Contact Person", self.lbl_supplier_contact)
+        add_field(g_top, 3, 0, "Phone", self.lbl_supplier_phone)
+        add_field(g_top, 3, 2, "Email", self.lbl_supplier_email)
+        add_field(g_top, 4, 0, "GSTIN", self.lbl_supplier_gstin)
+        add_field(g_top, 4, 2, "Address", self.lbl_supplier_address)
 
         # ── Inline "Create New Supplier" fields (hidden until needed) ──────────
         self._new_sup_frame = QFrame()
@@ -4003,24 +4438,104 @@ class ProductFormWidget(QWidget):
             "font-size:12px;font-weight:700;color:#0369a1;background:transparent;border:none;")
         nsf_lay.addWidget(_new_sup_title)
 
-        nsf_grid = QGridLayout(); nsf_grid.setSpacing(10)
-        nsf_grid.setColumnStretch(1, 1); nsf_grid.setColumnStretch(3, 1)
+        def _line(placeholder=""):
+            w = QLineEdit(); w.setFixedHeight(38); w.setPlaceholderText(placeholder)
+            return w
 
-        self.f_new_sup_phone   = QLineEdit(); self.f_new_sup_phone.setPlaceholderText("+91 98765 43210")
-        self.f_new_sup_phone.setFixedHeight(38)
-        self.f_new_sup_email   = QLineEdit(); self.f_new_sup_email.setPlaceholderText("supplier@example.com")
-        self.f_new_sup_email.setFixedHeight(38)
-        self.f_new_sup_gstin   = QLineEdit(); self.f_new_sup_gstin.setPlaceholderText("29AAAAA0000A1Z5")
-        self.f_new_sup_gstin.setFixedHeight(38)
-        self.f_new_sup_address = QLineEdit(); self.f_new_sup_address.setPlaceholderText("Street, City, State")
-        self.f_new_sup_address.setFixedHeight(38)
+        def _supplier_group(title):
+            box = QFrame()
+            box.setStyleSheet(
+                "QFrame{background:#ffffff;border:1px solid #dbeafe;border-radius:8px;}")
+            vl = QVBoxLayout(box); vl.setContentsMargins(12, 10, 12, 12); vl.setSpacing(8)
+            heading = QLabel(title)
+            heading.setStyleSheet(
+                "font-size:12px;font-weight:700;color:#1d4ed8;"
+                "background:transparent;border:none;")
+            vl.addWidget(heading)
+            grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(9)
+            grid.setColumnStretch(1, 1); grid.setColumnStretch(3, 1)
+            vl.addLayout(grid)
+            nsf_lay.addWidget(box)
+            return grid
 
-        def _nsf_lbl(txt): return QLabel(txt, styleSheet=LABEL_SS)
-        nsf_grid.addWidget(_nsf_lbl("Phone"),   0, 0); nsf_grid.addWidget(self.f_new_sup_phone,   0, 1)
-        nsf_grid.addWidget(_nsf_lbl("Email"),   0, 2); nsf_grid.addWidget(self.f_new_sup_email,   0, 3)
-        nsf_grid.addWidget(_nsf_lbl("GSTIN"),   1, 0); nsf_grid.addWidget(self.f_new_sup_gstin,   1, 1)
-        nsf_grid.addWidget(_nsf_lbl("Address"), 1, 2); nsf_grid.addWidget(self.f_new_sup_address, 1, 3)
-        nsf_lay.addLayout(nsf_grid)
+        # Basic information
+        self.f_new_sup_name = _line("Supplier / business name")
+        self.f_new_sup_code = _line("Auto-generated if left blank")
+        self.f_new_sup_contact = _line("Contact person")
+        self.f_new_sup_mobile = _line("+91 98765 43210")
+        self.f_new_sup_whatsapp = _line("+91 98765 43210")
+        self.f_new_sup_email = _line("supplier@example.com")
+        self.f_new_sup_gstin = _line("15-character GSTIN")
+        self.f_new_sup_pan = _line("10-character PAN")
+        basic = _supplier_group("Basic Information")
+        add_field(basic, 0, 0, "Supplier Name *", self.f_new_sup_name)
+        add_field(basic, 0, 2, "Supplier Code", self.f_new_sup_code)
+        add_field(basic, 1, 0, "Contact Person", self.f_new_sup_contact)
+        add_field(basic, 1, 2, "Mobile Number", self.f_new_sup_mobile)
+        add_field(basic, 2, 0, "WhatsApp Number", self.f_new_sup_whatsapp)
+        add_field(basic, 2, 2, "Email", self.f_new_sup_email)
+        add_field(basic, 3, 0, "GSTIN", self.f_new_sup_gstin)
+        add_field(basic, 3, 2, "PAN Number", self.f_new_sup_pan)
+
+        # Address information
+        self.f_new_sup_address1 = _line("Building, street, area")
+        self.f_new_sup_address2 = _line("Landmark or additional address")
+        self.f_new_sup_city = _line("City")
+        self.f_new_sup_state = _line("State")
+        self.f_new_sup_pincode = _line("Pincode")
+        self.f_new_sup_country = _line("Country")
+        self.f_new_sup_country.setText("India")
+        address = _supplier_group("Address Information")
+        add_field(address, 0, 0, "Address Line 1", self.f_new_sup_address1, span=2)
+        add_field(address, 1, 0, "Address Line 2", self.f_new_sup_address2, span=2)
+        add_field(address, 2, 0, "City", self.f_new_sup_city)
+        add_field(address, 2, 2, "State", self.f_new_sup_state)
+        add_field(address, 3, 0, "Pincode", self.f_new_sup_pincode)
+        add_field(address, 3, 2, "Country", self.f_new_sup_country)
+
+        # Banking information
+        self.f_new_sup_account_holder = _line("Name as per bank account")
+        self.f_new_sup_bank = _line("Bank name")
+        self.f_new_sup_branch = _line("Branch name")
+        self.f_new_sup_account_number = _line("Account number")
+        self.f_new_sup_ifsc = _line("IFSC code")
+        self.f_new_sup_upi = _line("name@bank")
+        banking = _supplier_group("Banking Information")
+        add_field(banking, 0, 0, "Account Holder Name", self.f_new_sup_account_holder)
+        add_field(banking, 0, 2, "Bank Name", self.f_new_sup_bank)
+        add_field(banking, 1, 0, "Branch Name", self.f_new_sup_branch)
+        add_field(banking, 1, 2, "Account Number", self.f_new_sup_account_number)
+        add_field(banking, 2, 0, "IFSC Code", self.f_new_sup_ifsc)
+        add_field(banking, 2, 2, "UPI ID", self.f_new_sup_upi)
+
+        # Purchase configuration
+        self.f_new_sup_payment_terms = QComboBox()
+        self.f_new_sup_payment_terms.addItems(
+            ["Immediate", "Net 7", "Net 15", "Net 30", "Net 45", "Net 60", "Net 90"])
+        self.f_new_sup_payment_terms.setCurrentText("Net 30")
+        self.f_new_sup_payment_terms.setFixedHeight(38)
+        _apply_combo_delegate(self.f_new_sup_payment_terms)
+        self.f_new_sup_credit = price_spin()
+        self.f_new_sup_default_lead = QSpinBox()
+        self.f_new_sup_default_lead.setRange(0, 365)
+        self.f_new_sup_default_lead.setSuffix(" days")
+        self.f_new_sup_default_lead.setFixedHeight(38)
+        self.f_new_sup_default_lead.setStyleSheet(_NO_ARROW)
+        self.f_new_sup_payment_method = QComboBox()
+        self.f_new_sup_payment_method.addItems(
+            ["", "Cash", "Bank Transfer", "UPI", "Cheque", "Credit", "Other"])
+        self.f_new_sup_payment_method.setFixedHeight(38)
+        _apply_combo_delegate(self.f_new_sup_payment_method)
+        self.f_new_sup_notes = QTextEdit()
+        self.f_new_sup_notes.setPlaceholderText("Purchase notes or supplier instructions")
+        self.f_new_sup_notes.setFixedHeight(72)
+        purchase = _supplier_group("Purchase Configuration")
+        add_field(purchase, 0, 0, "Payment Terms", self.f_new_sup_payment_terms)
+        add_field(purchase, 0, 2, "Credit Limit", self.f_new_sup_credit)
+        add_field(purchase, 1, 0, "Default Lead Time", self.f_new_sup_default_lead)
+        add_field(purchase, 1, 2, "Preferred Payment Method", self.f_new_sup_payment_method)
+        purchase.addWidget(QLabel("Notes", styleSheet=LABEL_SS), 2, 0)
+        purchase.addWidget(self.f_new_sup_notes, 2, 1, 1, 3)
         self._new_sup_frame.setVisible(False)
         lay.addWidget(sec_top)
         lay.addWidget(self._new_sup_frame)
@@ -4033,10 +4548,11 @@ class ProductFormWidget(QWidget):
         # Legacy fields kept for _collect/_save compatibility
         self.f_supplier_phone = QLineEdit(); self.f_supplier_phone.hide()
         self.f_supplier_email = QLineEdit(); self.f_supplier_email.hide()
-        self.f_supplier_gstin = QLineEdit(); self.f_supplier_gstin.hide()
 
         self.f_supplier_code = QLineEdit(); self.f_supplier_code.setPlaceholderText("Supplier's product SKU/code")
         self.f_supplier_code.setFixedHeight(38)
+        self.f_supplier_product_name = QLineEdit()
+        self.f_supplier_product_name.setPlaceholderText("Supplier's name for this product")
         self.f_last_purchase = price_spin()
         self.f_lead_time     = QSpinBox(); self.f_lead_time.setRange(0, 365)
         self.f_lead_time.setSuffix(" days"); self.f_lead_time.setFixedHeight(38)
@@ -4052,15 +4568,58 @@ class ProductFormWidget(QWidget):
 
         r2 = 0
         add_field(g2, r2, 0, "Supplier SKU",       self.f_supplier_code)
-        add_field(g2, r2, 2, "Last Purchase Price", self.f_last_purchase)
+        add_field(g2, r2, 2, "Supplier Product Name", self.f_supplier_product_name)
         r2 += 1
         add_field(g2, r2, 0, "MOQ",                 self.f_sup_moq,        hint="Min order quantity")
         add_field(g2, r2, 2, "Default Order Qty",   self.f_sup_default_qty)
         r2 += 1
         add_field(g2, r2, 0, "Lead Time",           self.f_lead_time,      hint="Days to restock")
+        add_field(g2, r2, 2, "Last Purchase Price", self.f_last_purchase)
         r2 += 1
         g2.addWidget(self.f_is_primary, r2, 0, 1, 4)
         lay.addWidget(sec2)
+
+        summary_sec, summary_grid = make_section("Purchase & Supplier Statistics", "📊")
+        self.lbl_sup_last_date = ro_label("—")
+        self.lbl_sup_last_invoice = ro_label("—")
+        self.lbl_sup_avg_price = ro_label("—")
+        self.lbl_sup_total_qty = ro_label("0")
+        self.lbl_sup_total_value = ro_label("₹ 0.00")
+        self.lbl_sup_available = ro_label("0")
+        self.lbl_sup_contribution = ro_label("0.0%")
+        summary_fields = [
+            ("Last Purchase Date", self.lbl_sup_last_date),
+            ("Last Invoice Number", self.lbl_sup_last_invoice),
+            ("Average Purchase Price", self.lbl_sup_avg_price),
+            ("Total Purchased Quantity", self.lbl_sup_total_qty),
+            ("Total Purchase Value", self.lbl_sup_total_value),
+            ("Available Stock From Supplier", self.lbl_sup_available),
+            ("Supplier Contribution %", self.lbl_sup_contribution),
+        ]
+        for i, (label, widget) in enumerate(summary_fields):
+            add_field(summary_grid, i // 2, (i % 2) * 2, label, widget)
+        lay.addWidget(summary_sec)
+
+        log_sec, log_grid = make_section("Purchase & Stock Log", "🧾")
+        log_actions = QHBoxLayout()
+        log_actions.addStretch()
+        self.btn_edit_invoice_log = _GBtn("Edit Selected Invoice", "warning")
+        self.btn_edit_invoice_log.clicked.connect(self._edit_selected_invoice)
+        log_actions.addWidget(self.btn_edit_invoice_log)
+        log_grid.addLayout(log_actions, 0, 0, 1, 4)
+        self.supplier_log_table = mini_table([
+            "Date", "Type", "Invoice / Reference", "Invoice Date", "Supplier",
+            "Qty In", "Qty Out", "Purchase Price", "Net Amount", "Available Stock",
+            "Payment Status", "Notes"
+        ], height=300)
+        self.supplier_log_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.supplier_log_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        log_grid.addWidget(self.supplier_log_table, 1, 0, 1, 4)
+        lay.addWidget(log_sec)
+        self._supplier_log_section = log_sec
+        self._supplier_log_rows = []
 
         # ── Linked Suppliers list (shows existing links after save) ───────────
         self._sec_linked, g_linked = make_section("Linked Suppliers", "\U0001f517")
@@ -4070,18 +4629,6 @@ class ProductFormWidget(QWidget):
         g_linked.addWidget(self._linked_list, 0, 0, 1, 4)
         lay.addWidget(self._sec_linked)
 
-        # ── Dimensions ───────────────────────────────────────────────────────
-        sec3, g3 = make_section("Physical Dimensions", "\U0001f4d0")
-        def dspin(s):
-            w = QDoubleSpinBox(); w.setRange(0, 9999); w.setDecimals(3); w.setSuffix(s)
-            w.setFixedHeight(38); w.setStyleSheet(_NO_ARROW)
-            return w
-        self.f_weight = dspin(" kg"); self.f_length = dspin(" cm")
-        self.f_width  = dspin(" cm"); self.f_height = dspin(" cm")
-        r3 = 0
-        add_field(g3, r3, 0, "Weight", self.f_weight); add_field(g3, r3, 2, "Length", self.f_length); r3 += 1
-        add_field(g3, r3, 0, "Width",  self.f_width);  add_field(g3, r3, 2, "Height", self.f_height)
-        lay.addWidget(sec3)
         lay.addStretch()
         self.tabs.addTab(page, "\U0001f69a  Supplier")
 
@@ -4101,12 +4648,25 @@ class ProductFormWidget(QWidget):
         match = next((n for n in names if n.lower() == text.lower()), None)
 
         if match:
-            # Existing supplier found — auto-fill phone/email/gstin from DB
+            # Existing supplier found — auto-fill contact details.
             row = get_supplier_by_name(self.db_name, match)
             if row:
-                self.f_supplier_phone.setText(row.get("phone",""))
+                self.f_supplier_phone.setText(
+                    row.get("mobile_number","") or row.get("phone",""))
                 self.f_supplier_email.setText(row.get("email",""))
-                self.f_supplier_gstin.setText(row.get("gstin",""))
+                self.lbl_supplier_master_code.setText(row.get("code", "") or "—")
+                self.lbl_supplier_contact.setText(row.get("contact_person", "") or "—")
+                self.lbl_supplier_phone.setText(
+                    row.get("mobile_number", "") or row.get("phone", "") or "—")
+                self.lbl_supplier_email.setText(row.get("email", "") or "—")
+                self.lbl_supplier_gstin.setText(row.get("gstin", "") or "—")
+                address = ", ".join(filter(None, [
+                    row.get("address_line1", "") or row.get("address", ""),
+                    row.get("address_line2", ""), row.get("city", ""),
+                    row.get("state", ""), row.get("pincode", "")]))
+                self.lbl_supplier_address.setText(address or "—")
+                if self.f_lead_time.value() == 0:
+                    self.f_lead_time.setValue(row.get("default_lead_time", 0) or 0)
             self._new_sup_frame.setVisible(False)
             self._sup_status_lbl.setText(
                 f"\u2705  Existing supplier selected")
@@ -4115,10 +4675,76 @@ class ProductFormWidget(QWidget):
         else:
             # No match — show create-new panel
             self._new_sup_frame.setVisible(True)
+            self.f_new_sup_name.setText(text)
+            if not self.f_new_sup_country.text().strip():
+                self.f_new_sup_country.setText("India")
             self._sup_status_lbl.setText(
                 "\u2795  New supplier — fill details below to create")
             self._sup_status_lbl.setStyleSheet(
                 "font-size:11px;color:#0369a1;background:transparent;border:none;")
+        self._refresh_supplier_summary()
+
+    def _refresh_supplier_summary(self):
+        if not hasattr(self, "lbl_sup_total_qty"):
+            return
+        product_code = self.edit_code or ""
+        supplier = get_supplier_by_name(
+            self.db_name, self.f_supplier_name.currentText().strip())
+        stats = get_supplier_product_stats(
+            self.db_name, product_code, supplier["code"]) if product_code and supplier else {}
+        self.lbl_sup_last_date.setText(stats.get("last_date") or "—")
+        self.lbl_sup_last_invoice.setText(stats.get("last_invoice") or "—")
+        self.lbl_sup_avg_price.setText(
+            f"₹ {stats.get('average_price', 0):,.2f}" if stats else "—")
+        self.lbl_sup_total_qty.setText(str(stats.get("total_qty", 0)))
+        self.lbl_sup_total_value.setText(f"₹ {stats.get('total_value', 0):,.2f}")
+        available = int((get_product_full(self.db_name, product_code) or {}).get("stock", 0)) if product_code else 0
+        self.lbl_sup_available.setText(str(min(available, stats.get("total_qty", 0))))
+        self.lbl_sup_contribution.setText(f"{stats.get('contribution', 0):.1f}%")
+
+    def _view_supplier_profile(self):
+        row = get_supplier_by_name(
+            self.db_name, self.f_supplier_name.currentText().strip())
+        if not row:
+            QMessageBox.information(self, "Supplier", "Select an existing supplier first.")
+            return
+        details = [
+            f"Code: {row.get('code', '')}", f"Contact: {row.get('contact_person', '')}",
+            f"Phone: {row.get('mobile_number', '') or row.get('phone', '')}",
+            f"WhatsApp: {row.get('whatsapp_number', '')}", f"Email: {row.get('email', '')}",
+            f"GSTIN: {row.get('gstin', '')}", f"PAN: {row.get('pan_number', '')}",
+            f"Payment Terms: {row.get('payment_terms', '')}",
+            f"Credit Limit: ₹ {float(row.get('credit_limit', 0) or 0):,.2f}",
+            f"Bank: {row.get('bank_name', '')}", f"UPI: {row.get('upi_id', '')}",
+            f"Notes: {row.get('notes', '')}",
+        ]
+        QMessageBox.information(self, row.get("name", "Supplier"), "\n".join(details))
+
+    def _focus_supplier_logs(self):
+        self.tabs.setCurrentWidget(self.tabs.widget(3))
+        self.supplier_log_table.setFocus()
+
+    def _edit_selected_invoice(self):
+        row = self.supplier_log_table.currentRow()
+        if row < 0 or row >= len(self._supplier_log_rows):
+            QMessageBox.information(self, "Select Invoice", "Select an invoice row to edit.")
+            return
+        row_type, record = self._supplier_log_rows[row]
+        if row_type != "invoice":
+            QMessageBox.information(self, "Invoice Only", "Only purchase invoice rows can be edited.")
+            return
+
+        product = get_product_full(self.db_name, self.edit_code) or {}
+        dlg = PurchaseStockDialog(
+            self.db_name, self.edit_code,
+            self.f_name.text().strip() or self.edit_code,
+            int(product.get("stock", 0) or 0), self.current_user,
+            self, invoice_record=record)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.prod = get_product_full(self.db_name, self.edit_code) or self.prod
+            self._refresh_supplier_logs()
+            self._refresh_supplier_summary()
+            self._update_stock_calcs()
 
     def _refresh_linked_suppliers(self):
         """Populate the Linked Suppliers section from DB."""
@@ -4127,7 +4753,7 @@ class ProductFormWidget(QWidget):
             item = self._linked_vlay.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
-        product_code = getattr(self, '_edit_id', None)
+        product_code = self.edit_code
         if not product_code:
             empty = QLabel("Save the product first to see linked suppliers.")
             empty.setStyleSheet(
@@ -4191,15 +4817,46 @@ class ProductFormWidget(QWidget):
             sup_code = row["code"]
         else:
             # Create new supplier from inline fields
+            name = self.f_new_sup_name.text().strip() or name
+            terms_text = self.f_new_sup_payment_terms.currentText().strip()
+            payment_days = 0 if terms_text == "Immediate" else int(
+                "".join(ch for ch in terms_text if ch.isdigit()) or 0)
             sup_code = create_supplier(
                 self.db_name, name,
-                phone   = self.f_new_sup_phone.text().strip(),
-                email   = self.f_new_sup_email.text().strip(),
-                gstin   = self.f_new_sup_gstin.text().strip(),
-                address = self.f_new_sup_address.text().strip(),
+                code = self.f_new_sup_code.text().strip(),
+                contact_person = self.f_new_sup_contact.text().strip(),
+                mobile_number = self.f_new_sup_mobile.text().strip(),
+                whatsapp_number = self.f_new_sup_whatsapp.text().strip(),
+                email = self.f_new_sup_email.text().strip(),
+                gstin = self.f_new_sup_gstin.text().strip(),
+                pan_number = self.f_new_sup_pan.text().strip(),
+                address_line1 = self.f_new_sup_address1.text().strip(),
+                address_line2 = self.f_new_sup_address2.text().strip(),
+                city = self.f_new_sup_city.text().strip(),
+                state = self.f_new_sup_state.text().strip(),
+                pincode = self.f_new_sup_pincode.text().strip(),
+                country = self.f_new_sup_country.text().strip(),
+                account_holder_name = self.f_new_sup_account_holder.text().strip(),
+                bank_name = self.f_new_sup_bank.text().strip(),
+                branch_name = self.f_new_sup_branch.text().strip(),
+                account_number = self.f_new_sup_account_number.text().strip(),
+                ifsc = self.f_new_sup_ifsc.text().strip(),
+                upi_id = self.f_new_sup_upi.text().strip(),
+                payment_terms_days = payment_days,
+                credit_limit = self.f_new_sup_credit.value(),
+                default_lead_time = self.f_new_sup_default_lead.value(),
+                preferred_payment_method =
+                    self.f_new_sup_payment_method.currentText().strip(),
+                notes = self.f_new_sup_notes.toPlainText().strip(),
             )
             if not sup_code:
+                QMessageBox.warning(
+                    self, "Supplier Not Created",
+                    "The supplier code is already in use, or the supplier details "
+                    "could not be saved.")
                 return
+            self.f_supplier_phone.setText(self.f_new_sup_mobile.text().strip())
+            self.f_supplier_email.setText(self.f_new_sup_email.text().strip())
             # Refresh cache
             self._sup_names_cache = get_all_supplier_names(self.db_name)
 
@@ -4209,98 +4866,16 @@ class ProductFormWidget(QWidget):
             sup_sku     = self.f_supplier_code.text().strip(),
             unit_price  = self.f_last_purchase.value(),
             moq         = self.f_sup_moq.value(),
-            lead_days   = self.f_lead_time.value(),
+            lead_days   = self.f_lead_time.value() or (
+                self.f_new_sup_default_lead.value() if not row else 0),
             is_primary  = int(self.f_is_primary.isChecked()),
             default_qty = self.f_sup_default_qty.value(),
+            supplier_product_name = self.f_supplier_product_name.text().strip(),
         )
         self._refresh_linked_suppliers()
+        self._refresh_supplier_summary()
 
-
-    # ── TAB 5: COMPLIANCE ─────────────────────────────────
-
-    # ── helpers for label designer ───────────────────────
-    # ── TAB 5: LABEL PRINT ────────────────────────────────
-    def _build_tab_compliance(self):
-        page = QWidget(); page.setStyleSheet("background:transparent;")
-        lay = QVBoxLayout(page); lay.setContentsMargins(0, 16, 0, 0); lay.setSpacing(0)
-
-        # ── Hidden stubs (keep _collect/_save working) ────
-        self.f_fssai      = QLineEdit();  self.f_fssai.hide()
-        self.f_drug_lic   = QLineEdit();  self.f_drug_lic.hide()
-        self.f_is_sched   = ToggleSwitch();  self.f_is_sched.hide()
-        self.f_sched_type = QComboBox();  self.f_sched_type.hide()
-        self.f_einvoice   = ToggleSwitch();  self.f_einvoice.hide()
-        self.f_eway       = ToggleSwitch();  self.f_eway.hide()
-        self.f_print_mrp  = ToggleSwitch();  self.f_print_mrp.setChecked(True); self.f_print_mrp.hide()
-        self.f_print_hsn  = ToggleSwitch();  self.f_print_hsn.setChecked(True); self.f_print_hsn.hide()
-        self.f_label_fmt  = QComboBox();  self.f_label_fmt.hide()
-        self.f_lbl_paper     = QComboBox(); self.f_lbl_paper.hide()
-        self.f_lbl_columns   = QSpinBox();  self.f_lbl_columns.hide()
-        self.f_lbl_height    = QDoubleSpinBox(); self.f_lbl_height.hide()
-        self.f_lbl_gap       = QDoubleSpinBox(); self.f_lbl_gap.hide()
-        self.f_lbl_mar_l     = QDoubleSpinBox(); self.f_lbl_mar_l.hide()
-        self.f_lbl_mar_r     = QDoubleSpinBox(); self.f_lbl_mar_r.hide()
-        self.f_lbl_dpi       = QComboBox(); self.f_lbl_dpi.hide()
-        self.f_lbl_show_name     = ToggleSwitch(); self.f_lbl_show_name.hide()
-        self.f_lbl_show_barcode  = ToggleSwitch(); self.f_lbl_show_barcode.hide()
-        self.f_lbl_show_mrp      = ToggleSwitch(); self.f_lbl_show_mrp.hide()
-        self.f_lbl_show_price    = ToggleSwitch(); self.f_lbl_show_price.hide()
-        self.f_lbl_show_mrp_lbl  = ToggleSwitch(); self.f_lbl_show_mrp_lbl.hide()
-        self.f_lbl_show_hsn      = ToggleSwitch(); self.f_lbl_show_hsn.hide()
-        self.f_lbl_show_alias    = ToggleSwitch(); self.f_lbl_show_alias.hide()
-        self.f_lbl_show_itemcode = ToggleSwitch(); self.f_lbl_show_itemcode.hide()
-        self.f_lbl_show_gst      = ToggleSwitch(); self.f_lbl_show_gst.hide()
-        self.f_lbl_show_brand    = ToggleSwitch(); self.f_lbl_show_brand.hide()
-        self.f_lbl_printer       = QComboBox(); self.f_lbl_printer.hide()
-        self._lbl_preset         = QComboBox(); self._lbl_preset.hide()
-        self._lbl_info           = QLabel(); self._lbl_info.hide()
-        self._qz_status          = QLabel(); self._qz_status.hide()
-
-        # ── Coming Soon UI ─────────────────────────────────
-        lay.addStretch(1)
-
-        icon_lbl = QLabel("🏷️")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        icon_lbl.setStyleSheet("font-size:52px;background:transparent;border:none;")
-        lay.addWidget(icon_lbl)
-
-        lay.addSpacing(12)
-
-        title_lbl = QLabel("Label Print")
-        title_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        title_lbl.setStyleSheet(
-            "font-size:22px;font-weight:700;color:#1d1d1f;"
-            "background:transparent;border:none;")
-        lay.addWidget(title_lbl)
-
-        lay.addSpacing(8)
-
-        sub_lbl = QLabel("Coming Soon")
-        sub_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        sub_lbl.setStyleSheet(
-            "font-size:15px;font-weight:600;color:#FA2D48;"
-            "background:transparent;border:none;letter-spacing:1px;")
-        lay.addWidget(sub_lbl)
-
-        lay.addSpacing(14)
-
-        desc_lbl = QLabel(
-            "A full label designer with barcode printing,\n"
-            "custom layouts, and QZ Tray integration\n"
-            "will be available in a future update."
-        )
-        desc_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        desc_lbl.setWordWrap(True)
-        desc_lbl.setStyleSheet(
-            "font-size:13px;color:#6e6e73;"
-            "background:transparent;border:none;line-height:1.6;")
-        lay.addWidget(desc_lbl)
-
-        lay.addStretch(2)
-        self.tabs.addTab(page, "\U0001f3f7\ufe0f  Label Print")
-
-
-    # ── TAB 6: SALES HISTORY ──────────────────────────────
+    # ── TAB 5: SALES HISTORY ──────────────────────────────
 
     def _build_tab_history(self):
         page = QWidget(); page.setStyleSheet("background:transparent;")
@@ -4321,7 +4896,7 @@ class ProductFormWidget(QWidget):
         kpi_row.addWidget(kpi("Total Units Sold", "lbl_total_sold"))
         kpi_row.addWidget(kpi("Total Revenue",    "lbl_total_rev"))
         kpi_row.addWidget(kpi("Return Count",     "lbl_returns"))
-        kpi_row.addWidget(kpi("Invoice Count",    "lbl_inv_count"))
+        kpi_row.addWidget(kpi("Sales Count",      "lbl_inv_count"))
         lay.addLayout(kpi_row)
 
         sec, g = make_section("Sales Stats", "📊")
@@ -4411,7 +4986,7 @@ class ProductFormWidget(QWidget):
             px = QPixmap(path)
             if not px.isNull():
                 self.img_label.setPixmap(
-                    px.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio,
+                    px.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio,
                               Qt.TransformationMode.SmoothTransformation))
                 self.img_label.setText("")
 
@@ -4424,6 +4999,8 @@ class ProductFormWidget(QWidget):
         self.edit_code = None; self.prod = {}
         self._title_lbl.setText("Add Product"); self._btn_save.setText("💾  Save Product")
         self._reset_fields()
+        self._refresh_reusable_product_dropdowns()
+        self._refresh_sub_categories()
         self.f_item_code.setText(get_next_item_code(self.db_name))
         self.f_item_code.setReadOnly(True)
         self.f_auto_barcode.setVisible(True); self.f_auto_barcode.setChecked(False)
@@ -4431,15 +5008,101 @@ class ProductFormWidget(QWidget):
         self._toggle_variants(False)
         self._toggle_color_variants(False)
         self._toggle_custom_variants(False)
-        self._load_purchase_log()
-        self.batch_frame.setVisible(False); self.adj_frame.setVisible(False)
+        self.adj_frame.setVisible(False)
+        self._refresh_supplier_logs()
+        self._refresh_supplier_summary()
         self.tabs.setCurrentIndex(0)
+
+    def _on_category_changed(self, category):
+        self._refresh_sub_categories(category=category, preserve_current=False)
+
+    def _refresh_sub_categories(self, category=None, preserve_current=True):
+        if not hasattr(self, "f_sub_cat"):
+            return
+        current = self.f_sub_cat.currentText().strip() if preserve_current else ""
+        category = (
+            category.strip() if isinstance(category, str)
+            else self.f_category.currentText().strip()
+        )
+        mapped = SUB_CATEGORY_OPTIONS.get(category, [])
+        saved = get_saved_sub_categories(self.db_name, category)
+        values = list(dict.fromkeys(mapped + saved))
+        self.f_sub_cat.blockSignals(True)
+        self.f_sub_cat.clear()
+        self.f_sub_cat.addItem("")
+        self.f_sub_cat.addItems(values)
+        if current:
+            index = self.f_sub_cat.findText(
+                current, Qt.MatchFlag.MatchFixedString
+            )
+            if index >= 0:
+                self.f_sub_cat.setCurrentIndex(index)
+            else:
+                self.f_sub_cat.setEditText(current)
+        self.f_sub_cat.blockSignals(False)
+
+    def _refresh_reusable_product_dropdowns(self):
+        """Refresh editable dropdowns while preserving typed/current values."""
+        configs = [
+            (self.f_category, "category",
+             ["Shirts", "T-Shirts", "Polo T-Shirts", "Jeans", "Trousers",
+              "Formal Pants", "Chinos", "Shorts", "Blazers", "Suits",
+              "Jackets", "Hoodies", "Sweatshirts", "Kurta", "Innerwear",
+              "Accessories"]),
+            (self.f_product_group, "product_group",
+             ["Apparel", "Footwear", "Accessories", "Innerwear", "Seasonal Collection"]),
+            (self.f_brand, "brand", []),
+            (self.f_fabric, "fabric_type",
+             ["Cotton", "Linen", "Polyester", "Cotton Blend", "Denim", "Rayon",
+              "Viscose", "Lycra", "Spandex", "Wool", "Silk", "Satin", "Terry Cotton"]),
+            (self.f_fit, "fit_type",
+             ["Slim Fit", "Regular Fit", "Relaxed Fit", "Skinny Fit",
+              "Comfort Fit", "Oversized"]),
+            (self.f_color, "color",
+             ["Black", "White", "Navy Blue", "Sky Blue", "Grey", "Charcoal Grey",
+              "Brown", "Beige", "Khaki", "Olive Green", "Green", "Maroon", "Red",
+              "Yellow", "Orange", "Pink", "Purple", "Multi Color"]),
+            (self.f_pattern, "pattern",
+             ["Solid", "Checked", "Striped", "Printed", "Floral", "Self Design",
+              "Textured", "Graphic Print"]),
+            (self.f_occasion, "occasion",
+             ["Casual", "Formal", "Party Wear", "Wedding", "Office Wear",
+              "Daily Wear", "Sports Wear", "Ethnic Wear", "Travel"]),
+        ]
+        for combo, column, defaults in configs:
+            current = combo.currentText().strip()
+            values = list(dict.fromkeys(defaults + get_saved_product_values(
+                self.db_name, column
+            )))
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems([""] + values)
+            if current:
+                index = combo.findText(current, Qt.MatchFlag.MatchFixedString)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                else:
+                    combo.setEditText(current)
+            combo.blockSignals(False)
 
     def load_for_edit(self, item_code):
         self.edit_code = item_code
         self.prod = get_product_full(self.db_name, item_code) or {}
         self._title_lbl.setText(f"Edit — {item_code}"); self._btn_save.setText("💾  Update Product")
-        self._reset_fields(); self._populate()
+        self._reset_fields()
+        self._refresh_reusable_product_dropdowns()
+        self._refresh_sub_categories()
+        self._populate()
+        linked_suppliers = get_product_suppliers(self.db_name, item_code)
+        if linked_suppliers:
+            linked = next(
+                (row for row in linked_suppliers if row.get("is_primary")),
+                linked_suppliers[0])
+            self.f_supplier_product_name.setText(
+                linked.get("supplier_product_name", "") or "")
+            self.f_sup_moq.setValue(int(linked.get("moq", 1) or 1))
+            self.f_sup_default_qty.setValue(int(linked.get("pack_size", 1) or 1))
+            self.f_is_primary.setChecked(bool(linked.get("is_primary")))
         saved_colors = get_product_variants(
             self.db_name, item_code, COLOR_STORAGE_GROUP
         )
@@ -4469,9 +5132,11 @@ class ProductFormWidget(QWidget):
         self._toggle_variants(self.f_has_variants.isChecked())
         self._toggle_color_variants(self.f_has_color_variants.isChecked())
         self._toggle_custom_variants(self.f_has_custom_variants.isChecked())
-        self._update_tracking_fields(); self.adj_frame.setVisible(False)
-        self._load_batches(); self._load_purchase_log(item_code)
+        self.adj_frame.setVisible(False)
         self._load_history(); self._load_audit()
+        self._refresh_supplier_logs()
+        self._refresh_linked_suppliers()
+        self._refresh_supplier_summary()
         self.tabs.setCurrentIndex(0)
 
     def _toggle_barcode(self, state):
@@ -4497,25 +5162,26 @@ class ProductFormWidget(QWidget):
         for w in self.findChildren(QDoubleSpinBox): w.setValue(0)
         for w in self.findChildren(QComboBox):      w.setCurrentIndex(0)
         for w in self.findChildren(QCheckBox):      w.setChecked(False)
-        self.f_pack_size.setValue(1); self.f_min_order_qty.setValue(1)
-        self.f_expiry_alert.setValue(30); self.f_returnable.setChecked(True)
-        self.f_print_mrp.setChecked(True); self.f_print_hsn.setChecked(True)
+        self.f_pack_size.setValue(1)
+        self.f_warehouse.setCurrentText("Main Store")
+        self.f_returnable.setChecked(True)
         self.f_is_primary.setChecked(True)
-        self.f_mfg_date.setDate(QDate.currentDate())
-        self.f_expiry_date.setDate(QDate.currentDate().addYears(1))
-        self.f_purchase_date.setDate(QDate.currentDate())
-        self.f_purchase_date.clear()
-        self.purchase_log_table.setRowCount(0)
+        self.f_tax_inclusive.setChecked(True)
+        if hasattr(self, "f_new_sup_country"):
+            self.f_new_sup_country.setText("India")
+            self.f_new_sup_payment_terms.setCurrentText("Net 30")
         if hasattr(self, "_variant_radios"):
             self._variant_radios["Generic"].setChecked(True)
-        self._update_tracking_fields()
         self.f_margin.blockSignals(True)
         self.f_margin.setValue(0.0)
         self.f_margin.blockSignals(False)
         self.lbl_markup.setText("—")
+        self.lbl_last_purchase_price.setText("—")
+        self.lbl_average_purchase_price.setText("—")
         self.f_profit.blockSignals(True)
         self.f_profit.setValue(0.0)
         self.f_profit.blockSignals(False)
+        self._update_stock_calcs()
 
     def _populate(self):
         p = self.prod
@@ -4549,10 +5215,15 @@ class ProductFormWidget(QWidget):
         sv(self.f_prod_type, "product_type"); sv(self.f_tax_cat, "tax_category")
         sv(self.f_product_group, "product_group"); sv(self.f_category, "category")
         sv(self.f_sub_cat, "sub_category");   sv(self.f_brand, "brand")
+        sv(self.f_style_code, "style_code");   sv(self.f_fabric, "fabric_type")
+        sv(self.f_size, "size");               sv(self.f_color, "color")
+        sv(self.f_fit, "fit_type");            sv(self.f_pattern, "pattern")
+        sv(self.f_sleeve, "sleeve")
+        sv(self.f_collar, "collar_type");      sv(self.f_gender, "gender")
+        sv(self.f_season, "season");           sv(self.f_occasion, "occasion")
         sv(self.f_manufacturer, "manufacturer"); sv(self.f_country, "country_of_origin")
         sv(self.f_unit, "unit");              sv(self.f_pack_size, "pack_size", 1)
-        sv(self.f_meter, "meter");            sv(self.f_shelf_life, "shelf_life_days")
-        sv(self.f_storage, "storage_condition"); sv(self.f_tags, "tags")
+        sv(self.f_meter, "meter");             sv(self.f_tags, "tags")
         sv(self.f_desc, "description");       sv(self.f_notes, "internal_notes")
         sv(self.f_status, "status")
         img = p.get("image")
@@ -4560,7 +5231,7 @@ class ProductFormWidget(QWidget):
             self._image_blob = img; px = QPixmap(); px.loadFromData(img)
             if not px.isNull():
                 self.img_label.setPixmap(
-                    px.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio,
+                    px.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio,
                               Qt.TransformationMode.SmoothTransformation))
                 self.img_label.setText("")
         # Pricing
@@ -4580,52 +5251,50 @@ class ProductFormWidget(QWidget):
                    self.f_discount_pct, self.f_discount_val, self.f_purchase_price):
             _w.blockSignals(False)
         sv(self.f_gst_rate, "gst_rate");             sv(self.f_igst_rate, "igst_rate")
-        sv(self.f_tax_type, "tax_type");             sv(self.f_cess_pct, "cess_pct")
+        old_tax_type = str(p.get("tax_type") or "")
+        self.f_tax_type.setCurrentText(
+            "IGST" if old_tax_type.startswith("IGST") else "CGST+SGST"
+        )
+        sv(self.f_cess_pct, "cess_pct")
         sv(self.f_tcs, "tcs_applicable");            sv(self.f_gst_ex, "gst_exemption_reason")
         self._update_purchase_actual()
         self._update_margin()
-        self._update_gst_panel()
+        self._on_tax_category_changed(self.f_tax_cat.currentText())
+        last_purchase, average_purchase = get_purchase_price_insights(
+            self.db_name, self.edit_code
+        )
+        if not last_purchase:
+            last_purchase = float(
+                p.get("last_purchase_price") or p.get("purchase_price") or 0
+            )
+        if not average_purchase:
+            average_purchase = float(p.get("purchase_price") or 0)
+        self.lbl_last_purchase_price.setText(
+            f"₹ {last_purchase:,.2f}" if last_purchase else "—"
+        )
+        self.lbl_average_purchase_price.setText(
+            f"₹ {average_purchase:,.2f}" if average_purchase else "—"
+        )
         # Inventory
         sv(self.f_opening_stock, "opening_stock");   sv(self.f_reorder_level, "reorder_level")
         sv(self.f_safety_stock, "safety_stock");     sv(self.f_reorder_qty, "reorder_qty")
-        sv(self.f_min_order_qty, "min_order_qty", 1); sv(self.f_max_stock, "max_stock")
+        sv(self.f_net_quantity, "net_quantity"); sv(self.f_max_stock, "max_stock")
+        sv(self.f_reserved_stock, "reserved_stock")
+        sv(self.f_damaged_stock, "damaged_stock")
+        sv(self.f_returned_stock, "returned_stock")
+        sv(self.f_min_order_qty, "min_order_qty", 1)
         sv(self.f_auto_reorder, "auto_reorder");     sv(self.f_allow_neg, "allow_neg_stock")
         sv(self.f_returnable, "is_returnable");      sv(self.f_warehouse, "warehouse")
         sv(self.f_rack, "rack_location");            sv(self.f_bin, "bin_location")
-        sv(self.f_track_batch, "track_batch");       sv(self.f_track_expiry, "track_expiry")
-        sv(self.f_track_mfg, "track_mfg");           sv(self.f_track_serial, "track_serial")
-        sv(self.f_mfg_date, "mfg_date")
-        sv(self.f_expiry_date, "expiry_date");       sv(self.f_expiry_alert, "expiry_alert_days", 30)
-        self._update_tracking_fields()
-        self._calc_shelf()
-        cur = p.get("stock", 0); res = p.get("reserved_stock", 0); dam = p.get("damaged_stock", 0)
-        self.lbl_available.setText(str(max(0, (cur or 0) - (res or 0) - (dam or 0))))
-        pp = p.get("purchase_price", 0)
-        self.lbl_stock_val.setText(f"₹{(cur or 0) * (pp or 0):,.2f}" if pp else "—")
-        sold = p.get("total_qty_sold", 0)
-        if sold and sold > 0:
-            daily = sold / 30; days = int((cur or 0) / daily) if daily > 0 else 0
-            col = C["accent"] if days < 7 else (C["warning"] if days < 15 else C["success"])
-            self.lbl_days_left.setText(f"{days} days")
-            self.lbl_days_left.setStyleSheet(
-                f"background:{C['bg_light']};border:1px solid {C['border']};border-radius:8px;"
-                f"padding:6px 10px;font-size:13px;font-weight:700;color:{col};min-height:34px;")
+        self._update_stock_calcs()
         # Supplier
         sv(self.f_supplier_name, "supplier_name");   sv(self.f_supplier_code, "supplier_code")
         sv(self.f_supplier_phone, "supplier_phone"); sv(self.f_supplier_email, "supplier_email")
-        sv(self.f_supplier_gstin, "supplier_gstin"); sv(self.f_lead_time, "lead_time_days")
+        sv(self.f_lead_time, "lead_time_days")
         sv(self.f_last_purchase, "last_purchase_price")
-        sv(self.f_weight, "weight_kg");  sv(self.f_length, "length_cm")
-        sv(self.f_width, "width_cm");   sv(self.f_height, "height_cm")
         if p.get("variant_type") not in (COLOR_STORAGE_GROUP, CUSTOM_STORAGE_GROUP):
             sv(self.f_has_variants, "has_variants")
             sv(self.f_variant_type, "variant_type")
-        # Compliance
-        sv(self.f_fssai, "fssai_number");     sv(self.f_drug_lic, "drug_license_no")
-        sv(self.f_is_sched, "is_scheduled_drug"); sv(self.f_sched_type, "schedule_type")
-        sv(self.f_einvoice, "e_invoice_applicable"); sv(self.f_eway, "e_way_bill_applicable")
-        sv(self.f_print_mrp, "print_mrp_on_invoice"); sv(self.f_print_hsn, "print_hsn_on_invoice")
-        sv(self.f_label_fmt, "label_format")
 
     def _collect(self) -> dict:
         gst  = self.f_gst_rate.currentText().split("—")[0].strip().split(" ")[0]
@@ -4648,10 +5317,21 @@ class ProductFormWidget(QWidget):
             "description":           self.f_desc.toPlainText().strip(),
             "product_type":          self.f_prod_type.currentText(),
             "tax_category":          self.f_tax_cat.currentText(),
-            "product_group":         self.f_product_group.text().strip(),
+            "product_group":         self.f_product_group.currentText().strip(),
             "category":              self.f_category.currentText().strip(),
-            "sub_category":          self.f_sub_cat.text().strip(),
-            "brand":                 self.f_brand.text().strip(),
+            "sub_category":          self.f_sub_cat.currentText().strip(),
+            "sleeve":                self.f_sleeve.currentText().strip(),
+            "brand":                 self.f_brand.currentText().strip(),
+            "style_code":            self.f_style_code.text().strip(),
+            "fabric_type":           self.f_fabric.currentText().strip(),
+            "size":                  self.f_size.currentText().strip(),
+            "color":                 self.f_color.currentText().strip(),
+            "fit_type":              self.f_fit.currentText().strip(),
+            "pattern":               self.f_pattern.currentText().strip(),
+            "collar_type":           self.f_collar.currentText().strip(),
+            "gender":                self.f_gender.currentText().strip(),
+            "season":                self.f_season.currentText().strip(),
+            "occasion":              self.f_occasion.currentText().strip(),
             "manufacturer":          self.f_manufacturer.text().strip(),
             "country_of_origin":     self.f_country.text().strip() or "India",
             "hsn_code":              self.f_hsn.text().strip(),
@@ -4660,8 +5340,6 @@ class ProductFormWidget(QWidget):
             "unit":                  self.f_unit.currentText().strip(),
             "pack_size":             self.f_pack_size.value(),
             "meter":                 self.f_meter.text().strip(),
-            "shelf_life_days":       self.f_shelf_life.value(),
-            "storage_condition":     self.f_storage.currentText(),
             "image":                 self._image_blob or None,
             "mrp":                   self.f_mrp.value(),
             "purchase_price":        self.f_purchase_price.value(),
@@ -4687,35 +5365,32 @@ class ProductFormWidget(QWidget):
             "opening_stock":         self.f_opening_stock.value(),
             "stock":                 self.f_opening_stock.value() if not self.edit_code
                                      else self.prod.get("stock", self.f_opening_stock.value()),
+            "reserved_stock":        self.f_reserved_stock.value(),
+            "damaged_stock":         self.f_damaged_stock.value(),
+            "returned_stock":        self.f_returned_stock.value(),
             "reorder_level":         self.f_reorder_level.value(),
             "safety_stock":          self.f_safety_stock.value(),
             "reorder_qty":           self.f_reorder_qty.value(),
             "min_order_qty":         self.f_min_order_qty.value(),
+            "net_quantity":          self.f_net_quantity.value(),
             "max_stock":             self.f_max_stock.value(),
             "auto_reorder":          int(self.f_auto_reorder.isChecked()),
             "allow_neg_stock":       int(self.f_allow_neg.isChecked()),
             "is_returnable":         int(self.f_returnable.isChecked()),
-            "warehouse":             self.f_warehouse.currentText().strip(),
+            "warehouse":             self.f_warehouse.currentText().strip() or "Main Store",
             "rack_location":         self.f_rack.text().strip(),
             "bin_location":          self.f_bin.text().strip(),
-            "track_batch":           0,
-            "track_expiry":          0,
-            "track_mfg":             0,
-            "track_serial":          0,
-            "mfg_date":              "",
-            "expiry_date":           "",
-            "expiry_alert_days":     self.f_expiry_alert.value(),
+            "last_stock_updated":    self._stock_update_timestamp(),
             "supplier_name":         self.f_supplier_name.currentText().strip(),
             "supplier_code":         self.f_supplier_code.text().strip(),
             "supplier_phone":        self.f_supplier_phone.text().strip(),
             "supplier_email":        self.f_supplier_email.text().strip(),
-            "supplier_gstin":        self.f_supplier_gstin.text().strip(),
             "lead_time_days":        self.f_lead_time.value(),
             "last_purchase_price":   self.f_last_purchase.value(),
-            "weight_kg":             self.f_weight.value(),
-            "length_cm":             self.f_length.value(),
-            "width_cm":              self.f_width.value(),
-            "height_cm":             self.f_height.value(),
+            "weight_kg":             self.prod.get("weight_kg", 0),
+            "length_cm":             self.prod.get("length_cm", 0),
+            "width_cm":              self.prod.get("width_cm", 0),
+            "height_cm":             self.prod.get("height_cm", 0),
             "has_variants":          int(
                 self.f_has_variants.isChecked()
                 or self.f_has_color_variants.isChecked()
@@ -4728,22 +5403,12 @@ class ProductFormWidget(QWidget):
                     else self.f_variant_type.currentText().strip()
                 )
             ),
-            "fssai_number":          self.f_fssai.text().strip(),
-            "drug_license_no":       self.f_drug_lic.text().strip(),
-            "is_scheduled_drug":     int(self.f_is_sched.isChecked()),
-            "schedule_type":         self.f_sched_type.currentText(),
-            "e_invoice_applicable":  int(self.f_einvoice.isChecked()),
-            "e_way_bill_applicable": int(self.f_eway.isChecked()),
-            "print_mrp_on_invoice":  int(self.f_print_mrp.isChecked()),
-            "print_hsn_on_invoice":  int(self.f_print_hsn.isChecked()),
-            "label_format":          self.f_label_fmt.currentText(),
             "internal_notes":        self.f_notes.toPlainText().strip(),
             "status":                self.f_status.currentText(),
         }
 
     def _save(self):
         data = self._collect()
-        stock_update_qty = self._stock_update_qty()
         if not data["name"]:
             QMessageBox.warning(self, "Validation", "Product name is required.")
             self.tabs.setCurrentIndex(0); self.f_name.setFocus(); return
@@ -4756,6 +5421,29 @@ class ProductFormWidget(QWidget):
         if data["selling_price"] <= 0:
             QMessageBox.warning(self, "Validation", "Selling price must be > 0.")
             self.tabs.setCurrentIndex(1); self.f_selling_price.setFocus(); return
+        current_stock = int(
+            self.prod.get("stock", data["opening_stock"])
+            if self.edit_code else data["opening_stock"]
+        )
+        if data["damaged_stock"] > current_stock:
+            QMessageBox.warning(
+                self, "Validation",
+                "Damaged stock cannot be greater than current stock."
+            )
+            self.tabs.setCurrentIndex(2)
+            self.f_damaged_stock.setFocus()
+            return
+        if (
+            data["min_selling_price"] > 0
+            and data["selling_price"] < data["min_selling_price"]
+        ):
+            QMessageBox.warning(
+                self, "Validation",
+                "Selling price cannot be below the minimum selling price."
+            )
+            self.tabs.setCurrentIndex(1)
+            self.f_selling_price.setFocus()
+            return
         if self.f_has_variants.isChecked() and self._variant_radio_group.checkedButton() is None:
             QMessageBox.warning(self, "Validation", "Age Category is required.")
             self.tabs.setCurrentIndex(2); return
@@ -4766,12 +5454,6 @@ class ProductFormWidget(QWidget):
             self.tabs.setCurrentIndex(2)
             self.f_custom_variant.setFocus()
             return
-        if stock_update_qty > 0 and not self.f_purchase_invoice.text().strip():
-            QMessageBox.warning(self, "Validation", "Purchase invoice number is required for stock updates.")
-            self.tabs.setCurrentIndex(2); self.f_purchase_invoice.setFocus(); return
-        if stock_update_qty > 0 and not self.f_purchase_date.text().strip():
-            QMessageBox.warning(self, "Validation", "Date of purchase is required for stock updates.")
-            self.tabs.setCurrentIndex(2); self.f_purchase_date.setFocus(); return
         if data["mrp"] > 0 and data["selling_price"] > data["mrp"]:
             if QMessageBox.question(self, "Warning",
                 f"Selling price ₹{data['selling_price']:.2f} exceeds MRP ₹{data['mrp']:.2f}.\nContinue?",
@@ -4815,7 +5497,6 @@ class ProductFormWidget(QWidget):
                     self._rebuild_variant_table()
             else:
                 delete_product_variants(self.db_name, self.edit_code)
-            self._save_purchase_entry(self.edit_code, stock_update_qty)
             self._save_supplier_link(self.edit_code)
             self.saved.emit(self.edit_code)
         else:
@@ -4850,7 +5531,6 @@ class ProductFormWidget(QWidget):
                 else:
                     self._rebuild_variant_table()
                 self.edit_code = None
-            self._save_purchase_entry(data["item_code"], stock_update_qty)
             self._save_supplier_link(data["item_code"])
             self.saved.emit(data["item_code"])
 
@@ -4900,7 +5580,6 @@ class ProductListWidget(QWidget):
         # chips kept hidden — logic still updates them internally
         self._chip_total = QLabel(); self._chip_total.hide()
         self._chip_low   = QLabel(); self._chip_low.hide()
-        self._chip_exp   = QLabel(); self._chip_exp.hide()
 
         self._add_btn = QPushButton("＋  Add Product")
         self._add_btn.setFixedHeight(38); self._add_btn.setMinimumWidth(148)
@@ -5112,17 +5791,17 @@ class ProductListWidget(QWidget):
         fl.addLayout(filter_row)
         cl.addWidget(ff)
 
-        # Table — 12 columns
+        # Table — textile inventory columns
         self.table = QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
             "Item Code", "Product Name", "Category", "Unit",
-            "MRP ₹", "Sell ₹", "Margin", "Stock", "Reorder", "Expiry", "Status", "Actions"
+            "MRP ₹", "Sell ₹", "Margin", "Stock", "Reorder", "Status", "Actions"
         ])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col, w in enumerate([90, 0, 100, 58, 90, 90, 70, 65, 70, 100, 85, 110]):
+        for col, w in enumerate([90, 0, 100, 58, 90, 90, 70, 65, 70, 85, 110]):
             if w: self.table.setColumnWidth(col, w)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -5206,7 +5885,6 @@ class ProductListWidget(QWidget):
         if rows is None:
             rows = get_all_products(self.db_name, self._filters)
 
-        today   = date.today()
         tbl     = self.table
         tbl.setUpdatesEnabled(False)
         tbl.setSortingEnabled(False)
@@ -5215,11 +5893,9 @@ class ProductListWidget(QWidget):
         self._row_stocks = []
 
         low_count = 0
-        exp_count = 0
-
         for rd in rows:
             code, name, cat, unit, sell, mrp, stock, reorder, \
-                status, gst, expiry, last_sold, purchase, brand = rd
+                status, last_sold, purchase, brand = rd
 
             r = tbl.rowCount(); tbl.insertRow(r)
             tbl.setRowHeight(r, 42)
@@ -5269,21 +5945,6 @@ class ProductListWidget(QWidget):
 
             tbl.setItem(r, 8, _item(str(rod_v) if rod_v else "—", C_CTR))
 
-            exp_txt = "—"; exp_color = None
-            if expiry:
-                try:
-                    diff = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
-                    exp_txt = expiry
-                    if diff < 0:     exp_color = C["accent"]; exp_count += 1
-                    elif diff <= 30: exp_color = C["warning"]; exp_count += 1
-                except Exception:
-                    pass
-            ei = _item(exp_txt, C_CTR)
-            if exp_color:
-                ei.setForeground(QBrush(QColor(exp_color)))
-                ei.setBackground(QBrush(QColor(C["danger_tint"] if exp_color == C["accent"] else C["warning_tint"])))
-            tbl.setItem(r, 9, ei)
-
             sc = {
                 "Active":       (C["success_tint"], C["success"]),
                 "Draft":        (C["warning_tint"], C["warning"]),
@@ -5293,24 +5954,23 @@ class ProductListWidget(QWidget):
             sti = _item(str(status or ""), C_CTR)
             sti.setBackground(QBrush(QColor(sc[0])))
             sti.setForeground(QBrush(QColor(sc[1])))
-            tbl.setItem(r, 10, sti)
+            tbl.setItem(r, 9, sti)
 
-            act = _item("✏️  🗑", C_CTR)
-            act.setToolTip("Click to Edit or Delete")
+            act = _item("✏️  📦  🗑", C_CTR)
+            act.setToolTip("Edit, update stock, or delete")
             act.setForeground(QBrush(QColor(C["text2"])))
-            tbl.setItem(r, 11, act)
+            tbl.setItem(r, 10, act)
 
         tbl.setUpdatesEnabled(True)
         total = tbl.rowCount()
         self._chip_total.setText(f"{total} Products")
         self._chip_low.setText(f"{low_count} Low Stock")
-        self._chip_exp.setText(f"{exp_count} Expiring")
 
 
     # ── Cell click dispatcher ──────────────────────────────
 
     def _on_cell_clicked(self, row: int, col: int):
-        if col != 11 or row >= len(self._row_codes):
+        if col != 10 or row >= len(self._row_codes):
             return
         code  = self._row_codes[row]
         stock = self._row_stocks[row]
@@ -5321,12 +5981,20 @@ class ProductListWidget(QWidget):
         msg.setWindowTitle(f"Actions — {name}")
         msg.setText(f"<b>{name}</b>  ({code})\nChoose an action:")
         edit_btn = msg.addButton("✏️  Edit",        QMessageBox.ButtonRole.ActionRole)
+        stock_btn = msg.addButton("📦  Update Stock", QMessageBox.ButtonRole.ActionRole)
         del_btn  = msg.addButton("🗑  Delete",       QMessageBox.ButtonRole.DestructiveRole)
         msg.addButton("Cancel",                      QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked == edit_btn:
             self._on_edit(code)
+        elif clicked == stock_btn:
+            product = get_product_full(self.db_name, code) or {}
+            dlg = PurchaseStockDialog(
+                self.db_name, code, name, int(product.get("stock", stock) or 0),
+                self.current_user, self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._load_table()
         elif clicked == del_btn:
             self._confirm_delete(code)
 
@@ -5334,7 +6002,7 @@ class ProductListWidget(QWidget):
         reply = QMessageBox.question(
             self, "Delete Product",
             f"Soft-delete  '{item_code}'?\n"
-            "It will be hidden but kept in the database (safe for old invoices).",
+            "It will be hidden but kept in the database for historical records.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -5361,6 +6029,7 @@ class ProductPage(QWidget):
     def __init__(self, db_name, company_name="", on_back=None,
                  current_user="Admin", embedded=True, parent=None):
         super().__init__(parent)
+        apply_app_icon(self)
         self.db_name      = db_name
         self.current_user = current_user
         self._form_ready  = False
@@ -5423,5 +6092,7 @@ class ProductPage(QWidget):
     def _on_saved(self, _item_code):
         self._list.refresh()
         self._panel.slide_out()
+
+
 
 
