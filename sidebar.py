@@ -81,7 +81,7 @@ NAV_ITEMS = [
     ]),
     ("Customers", [
         ("customer",     "Customer Center",   "customers"),
-        ("credit",        "Credit Mgmt",       "credit"),
+        ("credit",        "Due Collection",    "credit"),
         ("loyalty",       "Loyalty",           "loyalty"),
     ]),
     ("Finance", [

@@ -34,6 +34,7 @@ from product_page import ProductPage
 from purchase_orders_page import PurchaseOrdersPage
 from low_stock_page import LowStockPage
 from customer_page import CustomerPage
+from credit_management_page import CreditManagementPage
 from input_behavior import ensure_global_input_guard
 from app_branding import apply_app_icon
 
@@ -1679,6 +1680,10 @@ class AppShell(QWidget):
             return CustomerPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"),
                 navigate_cb=self._show_page)
+
+        if key == "credit":
+            return CreditManagementPage(
+                db_name=db, current_user=getattr(self, "_username", "Admin"))
 
         # ── Placeholder for all other keys ────────────────────
         icon, title_text = _PAGE_META.get(key, ("📄", key.replace("_", " ").title()))
