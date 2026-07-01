@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QComboBox, QCheckBox, QFileDialog, QFrame,
     QSizePolicy, QScrollArea, QGridLayout,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui  import QFont, QColor, QPalette, QPixmap, QImage
 
 from sidebar import Sidebar
@@ -35,8 +35,10 @@ from purchase_orders_page import PurchaseOrdersPage
 from low_stock_page import LowStockPage
 from customer_page import CustomerPage
 from credit_management_page import CreditManagementPage
+from loyalty_page import LoyaltyPage
 from input_behavior import ensure_global_input_guard
 from app_branding import apply_app_icon
+from git_sync import GitSyncWorker, push_db_to_github
 
 # ──────────────────────────────────────────────────────────────
 #  MASTER SECRET
@@ -1685,6 +1687,10 @@ class AppShell(QWidget):
             return CreditManagementPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
 
+        if key == "loyalty":
+            return LoyaltyPage(
+                db_name=db, current_user=getattr(self, "_username", "Admin"))
+
         # ── Placeholder for all other keys ────────────────────
         icon, title_text = _PAGE_META.get(key, ("📄", key.replace("_", " ").title()))
         return _ContentPage(title_text, icon)
@@ -1818,6 +1824,18 @@ class MainWindow(QMainWindow):
         self._v_settings.prefill(self._db_path)
         self._go_to(self.I_SETTINGS)
         self.panel.show_features()
+        self._sync_db_to_github()  # new DB just created — push it to GitHub
+
+    def _sync_db_to_github(self):
+        """Push the current .db file to GitHub in the background."""
+        if not self._db_path:
+            return
+        self._sync_worker = GitSyncWorker(self._db_path, self)
+        self._sync_worker.finished_sync.connect(self._on_git_sync_done)
+        self._sync_worker.start()
+
+    def _on_git_sync_done(self, ok: bool, msg: str):
+        self._toast(msg, "success" if ok else "error")
 
     def _after_settings(self):
         self._db.save_company(self._v_settings.get_data())
@@ -1914,6 +1932,7 @@ class MainWindow(QMainWindow):
         self._shell.setVisible(True)
 
     def _logout(self):
+        self._sync_db_to_github()  # push latest DB state to GitHub on every sign-out
         self._shell.setVisible(False)
         self._rl.removeWidget(self._shell)
         self._v_login.clear_fields()
@@ -1925,6 +1944,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self._db: self._db.close()
+        if self._db_path:
+            # Blocking on purpose: a QThread would get killed before it
+            # finished once the app exits, so we push synchronously here.
+            push_db_to_github(self._db_path)
         super().closeEvent(e)
 
 
