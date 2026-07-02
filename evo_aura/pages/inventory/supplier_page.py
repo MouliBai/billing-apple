@@ -42,31 +42,8 @@ from PyQt6.QtWidgets import (
 
 from core.app_branding import apply_app_icon
 from core.input_behavior import ensure_global_input_guard
-
-try:
-    from pages.inventory.product_page import (
-        C,
-        FIELD_SS,
-        LABEL_SS,
-        SEC_HDR_SS,
-        _NO_ARROW,
-        _apply_combo_delegate,
-        init_product_table,
-    )
-except ImportError:
-    C = {
-        "bg_light": "#F5F5F7", "bg_white": "#FFFFFF", "border": "#D2D2D7",
-        "text": "#1D1D1F", "text2": "#6E6E73", "text3": "#A1A1A6",
-        "accent": "#FA2D48", "accent_dark": "#C81F36", "blue": "#1A73E8",
-        "success": "#27AE60", "warning": "#E67E22", "danger": "#E53935",
-        "accent_tint2": "#FFF0F2",
-    }
-    FIELD_SS = ""
-    LABEL_SS = "font-size:12px;color:#6E6E73;background:transparent;border:none;"
-    SEC_HDR_SS = "font-size:14px;font-weight:700;color:#1D1D1F;border:none;"
-    _NO_ARROW = ""
-    def _apply_combo_delegate(_combo): pass
-    def init_product_table(_db, _user="system"): pass
+from core.theme import C, FIELD_SS, LABEL_SS, SEC_HDR_SS
+from core.ui_helpers import NO_ARROW as _NO_ARROW, apply_combo_delegate as _apply_combo_delegate
 
 
 TABLE_SS = f"""
@@ -1752,7 +1729,6 @@ class SupplierPage(QWidget):
         apply_app_icon(self)
         self.db_name = db_name
         self.current_user = current_user
-        init_product_table(db_name, current_user)
         init_supplier_tables(db_name)
         self.setStyleSheet(f"background:{C['bg_light']};")
 
@@ -1762,41 +1738,58 @@ class SupplierPage(QWidget):
         root.addWidget(self.stack)
 
         self.list_page = SupplierListWidget(db_name, company_name)
-        self.detail_page = SupplierDetailWidget(db_name)
-        self.form_page = SupplierFormWidget(db_name, current_user)
+        self.detail_page = None
+        self.form_page = None
         self.stack.addWidget(self.list_page)
-        self.stack.addWidget(self.detail_page)
-        self.stack.addWidget(self.form_page)
 
         self.list_page.add_requested.connect(self._add)
         self.list_page.edit_requested.connect(self._edit)
         self.list_page.view_requested.connect(self._view)
-        self.detail_page.back_requested.connect(self._show_list)
-        self.detail_page.edit_requested.connect(self._edit)
-        self.form_page.cancelled.connect(self._show_list)
-        self.form_page.saved.connect(self._saved)
+
+    def _ensure_form_page(self):
+        if self.form_page is None:
+            self.form_page = SupplierFormWidget(self.db_name, self.current_user)
+            self.form_page.cancelled.connect(self._show_list)
+            self.form_page.saved.connect(self._saved)
+            self.stack.addWidget(self.form_page)
+        return self.form_page
+
+    def _ensure_detail_page(self):
+        if self.detail_page is None:
+            self.detail_page = SupplierDetailWidget(self.db_name)
+            self.detail_page.back_requested.connect(self._show_list)
+            self.detail_page.edit_requested.connect(self._edit)
+            self.stack.addWidget(self.detail_page)
+        return self.detail_page
 
     def _show_list(self):
         self.list_page.refresh()
         self.stack.setCurrentWidget(self.list_page)
 
     def _add(self):
-        self.form_page.load_for_add()
-        self.stack.setCurrentWidget(self.form_page)
+        form_page = self._ensure_form_page()
+        form_page.load_for_add()
+        self.stack.setCurrentWidget(form_page)
 
     def _edit(self, code):
-        self.form_page.load_for_edit(code)
-        self.stack.setCurrentWidget(self.form_page)
+        form_page = self._ensure_form_page()
+        form_page.load_for_edit(code)
+        self.stack.setCurrentWidget(form_page)
 
     def _view(self, code):
-        self.detail_page.load_supplier(code)
-        self.stack.setCurrentWidget(self.detail_page)
+        detail_page = self._ensure_detail_page()
+        detail_page.load_supplier(code)
+        self.stack.setCurrentWidget(detail_page)
 
     def _saved(self, code):
         self.list_page.refresh()
-        self.detail_page.load_supplier(code)
-        self.stack.setCurrentWidget(self.detail_page)
+        detail_page = self._ensure_detail_page()
+        detail_page.load_supplier(code)
+        self.stack.setCurrentWidget(detail_page)
 
     def refresh(self):
+        self.list_page.refresh()
+
+    def refresh_light(self):
         self.list_page.refresh()
 

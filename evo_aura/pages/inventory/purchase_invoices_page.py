@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import (
 
 from core.app_branding import apply_app_icon
 from core.input_behavior import ensure_global_input_guard
-from pages.inventory.product_page import (
-    C, FIELD_SS, _NO_ARROW, _apply_combo_delegate, init_product_table,
-)
+from core.theme import C, FIELD_SS
+from core.ui_helpers import NO_ARROW as _NO_ARROW, apply_combo_delegate as _apply_combo_delegate
+from repositories.product_repository import init_product_table
 from pages.inventory.supplier_page import init_supplier_tables
 
 
@@ -729,4 +729,7 @@ class PurchaseOrdersPage(QWidget):
             for col, value in enumerate(values):
                 self.drawer_items.setItem(row, col, QTableWidgetItem(str(value)))
         self.drawer.show()
+
+
+PurchaseOrdersPage.refresh_light = PurchaseOrdersPage.refresh
 

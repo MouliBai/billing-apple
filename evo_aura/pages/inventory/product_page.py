@@ -7190,11 +7190,11 @@ class ProductListWidget(QWidget):
 # ─────────────────────────────────────────────────────────────
 class ProductPage(QWidget):
     """
-    Two-phase construction (same as original deferred approach):
+    Lazy construction:
 
     Phase 1 (instant): DB migration + ProductListWidget built & shown.
-    Phase 2 (deferred via QTimer): ProductFormWidget (7 tabs, 200+ widgets)
-            built in the next event-loop tick — no visible freeze.
+    Phase 2 (on demand): ProductFormWidget is created only when Add/Edit is
+            clicked, so opening the product list stays quick.
     """
 
     def __init__(self, db_name, company_name="", on_back=None,
@@ -7226,12 +7226,12 @@ class ProductPage(QWidget):
 
         # ── Slide panel (overlay) ──────────────────────────
         self._panel = _SlidePanel(self)
-        self._form  = None   # built deferred
-
-        # Deferred heavy build
-        QTimer.singleShot(0, self._build_form_deferred)
+        self._form  = None   # built lazily
 
     def _build_form_deferred(self):
+        if self._form is not None:
+            self._form_ready = True
+            return
         self._form = ProductFormWidget(
             db_name      = self.db_name,
             current_user = self.current_user,
@@ -7250,19 +7250,22 @@ class ProductPage(QWidget):
 
     def _open_add(self):
         if not self._form_ready:
-            QTimer.singleShot(50, self._open_add); return
+            self._build_form_deferred()
         self._form.load_for_add()
         self._panel.slide_in()
 
     def _open_edit(self, item_code):
         if not self._form_ready:
-            QTimer.singleShot(50, lambda: self._open_edit(item_code)); return
+            self._build_form_deferred()
         self._form.load_for_edit(item_code)
         self._panel.slide_in()
 
     def _on_saved(self, _item_code):
         self._list.refresh()
         self._panel.slide_out()
+
+    def refresh_light(self):
+        self._list.refresh()
 
 
 

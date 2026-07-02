@@ -14,10 +14,9 @@ from PyQt6.QtWidgets import (
 
 from core.app_branding import apply_app_icon
 from core.input_behavior import ensure_global_input_guard
-from pages.inventory.product_page import (
-    C, FIELD_SS, _NO_ARROW, _apply_combo_delegate, init_product_table,
-    PurchaseStockDialog,
-)
+from core.theme import C, FIELD_SS
+from core.ui_helpers import NO_ARROW as _NO_ARROW, apply_combo_delegate as _apply_combo_delegate
+from repositories.product_repository import init_product_table
 from pages.inventory.supplier_page import init_supplier_tables
 from pages.inventory.purchase_invoices_page import PurchaseInvoiceDialog, init_purchase_tables
 
@@ -517,6 +516,7 @@ class LowStockPage(QWidget):
     def _add_stock(self):
         if not self._selected:
             return
+        from pages.inventory.product_dialogs import PurchaseStockDialog
         product = self._selected
         dialog = PurchaseStockDialog(
             self.db, product["item_code"], product.get("name") or product["item_code"],
@@ -587,4 +587,7 @@ class LowStockPage(QWidget):
                 self._selected["item_code"], until, "Admin snoozed alert",
                 self.current_user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         self.drawer.hide(); self._selected = None; self.refresh()
+
+
+LowStockPage.refresh_light = LowStockPage.refresh
 

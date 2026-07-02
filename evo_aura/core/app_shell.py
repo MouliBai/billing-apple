@@ -30,12 +30,6 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui  import QFont, QColor, QPalette, QPixmap, QImage
 
 from core.sidebar import Sidebar
-from pages.inventory.product_page import ProductPage
-from pages.inventory.purchase_invoices_page import PurchaseOrdersPage
-from pages.inventory.reorder_control_page import LowStockPage
-from pages.customers.customer_center_page import CustomerPage
-from pages.customers.due_collection_page import CreditManagementPage
-from pages.customers.loyalty_page import LoyaltyPage
 from core.input_behavior import ensure_global_input_guard
 from core.app_branding import apply_app_icon
 from core.git_sync import GitSyncWorker, push_db_to_github
@@ -143,6 +137,11 @@ class DB:
         # add role column if not present (migration for existing DBs)
         try:
             self.con.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+        except Exception:
+            pass
+        try:
+            from core.migrations import ensure_performance_indexes
+            ensure_performance_indexes(self.con)
         except Exception:
             pass
         self.con.commit()
@@ -1643,13 +1642,14 @@ class AppShell(QWidget):
         _, title = _PAGE_META.get(key, ("ðŸ“„", key.replace("_", " ").title()))
         self._page_title.setText(title)
 
-        if key != "home" and key in self._pages:
-            self._discard_page(key)
-
         if key not in self._pages:
             page = self._build_page(key)
             self._pages[key] = page
             self._stack.addWidget(page)
+        else:
+            page = self._pages[key]
+            if hasattr(page, "refresh_light"):
+                page.refresh_light()
 
         self._stack.setCurrentWidget(self._pages[key])
         self._sidebar.set_active(key)
@@ -1664,6 +1664,7 @@ class AppShell(QWidget):
 
         # â”€â”€ Real pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if key in ("product", "products"):
+            from pages.inventory.product_page import ProductPage
             return ProductPage(db_name=db)
 
         if key == "suppliers":
@@ -1671,23 +1672,28 @@ class AppShell(QWidget):
             return SupplierPage(db_name=db)
 
         if key == "purchase_orders":
+            from pages.inventory.purchase_invoices_page import PurchaseOrdersPage
             return PurchaseOrdersPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
 
         if key == "low_stock":
+            from pages.inventory.reorder_control_page import LowStockPage
             return LowStockPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
 
         if key == "customers":
+            from pages.customers.customer_center_page import CustomerPage
             return CustomerPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"),
                 navigate_cb=self._show_page)
 
         if key == "credit":
+            from pages.customers.due_collection_page import CreditManagementPage
             return CreditManagementPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
 
         if key == "loyalty":
+            from pages.customers.loyalty_page import LoyaltyPage
             return LoyaltyPage(
                 db_name=db, current_user=getattr(self, "_username", "Admin"))
 

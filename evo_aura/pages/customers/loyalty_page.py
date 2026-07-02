@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
 
 from core.app_branding import apply_app_icon
 from core.input_behavior import ensure_global_input_guard
-from pages.inventory.product_page import C, FIELD_SS, _NO_ARROW, _apply_combo_delegate
+from core.theme import C, FIELD_SS
+from core.ui_helpers import NO_ARROW as _NO_ARROW, apply_combo_delegate as _apply_combo_delegate
 from pages.customers.customer_center_page import (
     init_customer_tables, get_customer_invoices, CustomerFormDialog,
 )
@@ -531,6 +532,7 @@ class LoyaltyPage(QWidget):
         root.addLayout(body, 1)
         self.refresh()
 
+
     def _filters_match(self, row):
         search = self.search.text().strip().casefold()
         if search and search not in " ".join(str(row.get(key) or "") for key in (
@@ -585,6 +587,9 @@ class LoyaltyPage(QWidget):
                 None)
             if updated:
                 self._show_drawer(updated)
+
+    def refresh_light(self):
+        self.refresh()
 
     def _fill(self, table, rows, columns, money_columns=()):
         table.setRowCount(0)

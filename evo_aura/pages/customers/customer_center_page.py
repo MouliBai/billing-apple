@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
 
 from core.app_branding import apply_app_icon
 from core.input_behavior import ensure_global_input_guard
-from pages.inventory.product_page import C, FIELD_SS, _NO_ARROW, _apply_combo_delegate
+from core.theme import C, FIELD_SS
+from core.ui_helpers import NO_ARROW as _NO_ARROW, apply_combo_delegate as _apply_combo_delegate
 
 
 TABLE_SS = f"""
@@ -729,6 +730,9 @@ class CustomerPage(QWidget):
                 None)
             if updated:
                 self._show_drawer(updated)
+
+    def refresh_light(self):
+        self.refresh()
 
     def _fill(self, table, rows, columns, money_columns=()):
         table.setRowCount(0)

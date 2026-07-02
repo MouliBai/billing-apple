@@ -1,0 +1,1 @@
+"""Inventory pages and widgets."""
